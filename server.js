@@ -108,9 +108,6 @@ const startServer = async () => {
 
     console.log('✅ DB connected successfully');
 
-    // No auto-create admin — handled by User.js pre('save') hook
-    // First signup with tafadzwarunowanda@gmail.com becomes admin
-
     const PORT = process.env.PORT || 5000;
     const server = app.listen(PORT, () => {
       console.log(`\n🔥 Breathalyzer backend running on port ${PORT} in ${process.env.NODE_ENV} mode`);
