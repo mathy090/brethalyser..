@@ -7,7 +7,7 @@ const TestRecord = require('../models/TestRecord');
 // GET /api/admin/users
 router.get('/users', protect, admin, async (req, res) => {
   try {
-    const users = await User.find().select('-password');
+    const users = await User.find({}, '-password').sort({ role: -1, createdAt: 1 });
     res.json({ success: true, users });
   } catch (err) {
     console.error('Error fetching users:', err.message);
@@ -15,10 +15,12 @@ router.get('/users', protect, admin, async (req, res) => {
   }
 });
 
-// GET /api/admin/records
-router.get('/records', protect, admin, async (req, res) => {
+// GET /api/admin/tests
+router.get('/tests', protect, admin, async (req, res) => {
   try {
-    const records = await TestRecord.find().sort({ timestamp: -1 });
+    const records = await TestRecord.find()
+      .populate('officerId', 'firstName lastName email badgeNumber role')
+      .sort({ createdAt: -1 });
     res.json({ success: true, records });
   } catch (err) {
     console.error('Error fetching records:', err.message);
@@ -30,7 +32,7 @@ router.get('/records', protect, admin, async (req, res) => {
 router.get('/sync-count', protect, admin, async (req, res) => {
   try {
     const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const count = await TestRecord.countDocuments({ timestamp: { $gte: cutoff } });
+    const count = await TestRecord.countDocuments({ createdAt: { $gte: cutoff } });
     res.json({ success: true, count });
   } catch (err) {
     console.error('Error fetching sync count:', err.message);
@@ -38,17 +40,50 @@ router.get('/sync-count', protect, admin, async (req, res) => {
   }
 });
 
-// PATCH /api/admin/user/:id/disable (toggle)
-router.patch('/user/:id/disable', protect, admin, async (req, res) => {
+// PATCH /api/admin/users/:id/ban (consistent naming)
+router.patch('/users/:id/ban', protect, admin, async (req, res) => {
   try {
     const user = await User.findById(req.params.id).select('-password');
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    user.disabled = !user.disabled;
+    user.disabled = true;
     await user.save();
-    res.json({ success: true, user });
+    
+    res.json({ 
+      success: true, 
+      message: `User ${user.email} has been banned`,
+      user: {
+        id: user._id,
+        email: user.email,
+        disabled: user.disabled
+      }
+    });
   } catch (err) {
-    console.error('Error toggling user status:', err.message);
+    console.error('Error banning user:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// PATCH /api/admin/users/:id/promote
+router.patch('/users/:id/promote', protect, admin, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('-password');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    user.role = 'admin';
+    await user.save();
+    
+    res.json({ 
+      success: true, 
+      message: `User ${user.email} promoted to admin`,
+      user: {
+        id: user._id,
+        email: user.email,
+        role: user.role
+      }
+    });
+  } catch (err) {
+    console.error('Error promoting user:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
