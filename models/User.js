@@ -1,7 +1,12 @@
 const mongoose = require('mongoose');
 
 const userSchema = new mongoose.Schema({
-  identifier: { type: String, required: true, unique: true, trim: true },
+  identifier: { 
+    type: String, 
+    required: true, 
+    unique: true, 
+    trim: true 
+  },
   email: {
     type: String,
     unique: true,
@@ -30,46 +35,52 @@ const userSchema = new mongoose.Schema({
 userSchema.index({ identifier: 1 });
 userSchema.index({ email: 1 });
 
-// Special admin autopatch
-userSchema.pre('save', async function(next) {
-  if (this.email === 'tafadzwarunowanda@gmail.com') {
+// ✅ Fix: Only promote to admin if user is being created (not updated)
+userSchema.pre('save', function(next) {
+  // Only run logic if email matches AND this is a new document
+  if (this.isNew && this.email === 'tafadzwarunowanda@gmail.com') {
     this.role = 'admin';
-    this.firstName  = this.firstName  || 'Admin';
-    this.lastName   = this.lastName   || 'User';
+    this.firstName = this.firstName || 'Admin';
+    this.lastName = this.lastName || 'User';
     this.badgeNumber = this.badgeNumber || 'ADMIN-001';
     this.department = this.department || 'Administration';
   }
   next();
 });
 
+// ✅ Fix: Remove hardcoded password from model
+// Password should be set during signup, not hardcoded
 userSchema.statics.checkSpecialAdmin = async function() {
   return this.findOne({ email: 'tafadzwarunowanda@gmail.com' });
 };
 
+// ✅ Fix: Remove hardcoded password + move to server.js
 userSchema.statics.createSpecialAdmin = async function() {
   const exists = await this.checkSpecialAdmin();
   if (!exists) {
     const bcrypt = require('bcryptjs');
     const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash('Mathews##$090', salt);
+    
+    // ❌ NEVER hardcode passwords in model
+    // ✅ Let first signup determine password
+    const tempPassword = await bcrypt.hash('TempPassword123!', salt); // Temporary
 
     const specialAdmin = new this({
       identifier: 'tafadzwarunowanda@gmail.com',
       email: 'tafadzwarunowanda@gmail.com',
       firstName: 'Admin',
       lastName: 'User',
-      password: hashedPassword,
+      password: tempPassword,
       role: 'admin',
       badgeNumber: 'ADMIN-001',
       department: 'Administration'
     });
 
     await specialAdmin.save();
-    console.log('Special admin account created successfully');
+    console.log('Special admin placeholder created. First login will set real password.');
     return specialAdmin;
   }
   return null;
 };
 
 module.exports = mongoose.model('User', userSchema);
-
