@@ -13,18 +13,20 @@ const adminRoutes = require('./routes/admin');
 const syncRoutes = require('./routes/sync');
 
 const app = express();
+
+// Connect to DB first
 connectDB();
 
 // Security middleware
 app.use(helmet({
-  contentSecurityPolicy: false, // Disable CSP for development
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false
 }));
 app.use(cors());
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Serve uploaded photos (CRITICAL FOR YOUR APK)
+// Serve uploaded photos
 app.use('/uploads', express.static('uploads'));
 
 // Rate limiting
@@ -53,42 +55,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Initialize special admin (SECURE VERSION - NO HARDCODED PASSWORD)
-(async () => {
-  try {
-    // Wait for DB connection
-    await new Promise((resolve, reject) => {
-      if (mongoose.connection.readyState === 1) return resolve();
-      mongoose.connection.once('open', resolve);
-      mongoose.connection.once('error', reject);
-    });
-
-    console.log('✅ DB connected, checking special admin...');
-    const User = require('./models/User');
-    
-    // Check if special admin exists
-    let admin = await User.findOne({ email: 'tafadzwarunowanda@gmail.com' });
-    
-    if (!admin) {
-      console.log('👤 Special admin account does not exist. First user to sign up with this email will become admin.');
-    } else {
-      // Ensure admin has correct role and details
-      if (admin.role !== 'admin') {
-        admin.role = 'admin';
-        admin.firstName = admin.firstName || 'Admin';
-        admin.lastName = admin.lastName || 'User';
-        admin.badgeNumber = admin.badgeNumber || 'ADMIN-001';
-        admin.department = admin.department || 'Administration';
-        await admin.save();
-        console.log('🔐 Special admin role restored');
-      }
-      console.log(`✅ Special admin OK: ${admin.email}`);
-    }
-  } catch (e) {
-    console.error('❌ Special admin init error:', e.message);
-  }
-})();
-
 // 404 handler
 app.use('*', (req, res) => {
   if (req.path.startsWith('/uploads/')) {
@@ -107,7 +73,6 @@ app.use('*', (req, res) => {
 app.use((err, req, res, next) => {
   console.error('🚨 Server error:', err.message);
   
-  // Handle Multer file size errors
   if (err.code === 'LIMIT_FILE_SIZE') {
     return res.status(413).json({
       success: false,
@@ -115,7 +80,6 @@ app.use((err, req, res, next) => {
     });
   }
   
-  // Handle Multer file type errors
   if (err.message === 'Only images (jpeg, jpg, png) are allowed') {
     return res.status(400).json({
       success: false,
@@ -130,24 +94,64 @@ app.use((err, req, res, next) => {
   });
 });
 
-const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, () => {
-  console.log(`\n🔥 Breathalyzer backend running on port ${PORT} in ${process.env.NODE_ENV} mode`);
-  console.log('💡 Special admin: tafadzwarunowanda@gmail.com');
-  console.log('🔑 First signup with this email becomes admin (set your own password)');
-  console.log('📸 Photo uploads: /uploads/');
-  console.log('🛡️  Security: Helmet + Rate Limiting + CORS');
-  console.log('🔄 Use /api/auth/signup to create the admin account\n');
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('.SIGTERM signal received: closing HTTP server');
-  server.close(() => {
-    console.log('HTTP server closed');
-    mongoose.connection.close(false, () => {
-      console.log('MongoDB connection closed');
-      process.exit(0);
+// ✅ FIX: Wait for DB AND special admin check BEFORE starting server
+const startServer = async () => {
+  try {
+    // Wait for DB connection
+    await new Promise((resolve, reject) => {
+      if (mongoose.connection.readyState === 1) return resolve();
+      mongoose.connection.once('open', resolve);
+      mongoose.connection.once('error', reject);
     });
-  });
-});
+
+    console.log('✅ DB connected, checking special admin...');
+    const User = require('./models/User');
+    
+    let admin = await User.findOne({ email: 'tafadzwarunowanda@gmail.com' });
+    
+    if (!admin) {
+      console.log('👤 Special admin account does not exist. First user to sign up with this email will become admin.');
+    } else {
+      if (admin.role !== 'admin') {
+        admin.role = 'admin';
+        admin.firstName = admin.firstName || 'Admin';
+        admin.lastName = admin.lastName || 'User';
+        admin.badgeNumber = admin.badgeNumber || 'ADMIN-001';
+        admin.department = admin.department || 'Administration';
+        await admin.save();
+        console.log('🔐 Special admin role restored');
+      }
+      console.log(`✅ Special admin OK: ${admin.email}`);
+    }
+
+    // ✅ NOW start server
+    const PORT = process.env.PORT || 5000;
+    const server = app.listen(PORT, () => {
+      console.log(`\n🔥 Breathalyzer backend running on port ${PORT} in ${process.env.NODE_ENV} mode`);
+      console.log('💡 Special admin: tafadzwarunowanda@gmail.com');
+      console.log('🔑 First signup with this email becomes admin (set your own password)');
+      console.log('📸 Photo uploads: /uploads/');
+      console.log('🛡️  Security: Helmet + Rate Limiting + CORS');
+      console.log('🔄 Use /api/auth/signup to create the admin account\n');
+    });
+
+    // Graceful shutdown
+    process.on('SIGTERM', () => {
+      console.log('.SIGTERM signal received: closing HTTP server');
+      server.close(() => {
+        console.log('HTTP server closed');
+        mongoose.connection.close(false, () => {
+          console.log('MongoDB connection closed');
+          process.exit(0);
+        });
+      });
+    });
+
+  } catch (error) {
+    console.error('❌ Failed to start server:', error.message);
+    process.exit(1);
+  }
+};
+
+// Start everything
+startServer();
