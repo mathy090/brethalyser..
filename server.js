@@ -14,7 +14,7 @@ const syncRoutes = require('./routes/sync');
 
 const app = express();
 
-// Connect to DB first
+// Connect to database
 connectDB();
 
 // Security middleware
@@ -38,7 +38,9 @@ app.use(rateLimit({
   message: { success: false, message: 'Too many requests from this IP, please try again later.' }
 }));
 
-if (process.env.NODE_ENV === 'development') app.use(morgan('dev'));
+if (process.env.NODE_ENV === 'development') {
+  app.use(morgan('dev'));
+}
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -48,38 +50,38 @@ app.use('/api/sync', syncRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    success: true, 
-    message: 'Breathalyzer backend is running', 
-    timestamp: new Date().toISOString() 
+  res.status(200).json({
+    success: true,
+    message: 'Breathalyzer backend is running',
+    timestamp: new Date().toISOString()
   });
 });
 
 // 404 handler
 app.use('*', (req, res) => {
   if (req.path.startsWith('/uploads/')) {
-    return res.status(404).json({ 
-      success: false, 
-      message: 'Photo not found' 
+    return res.status(404).json({
+      success: false,
+      message: 'Photo not found'
     });
   }
-  res.status(404).json({ 
-    success: false, 
-    message: 'Route not found' 
+  res.status(404).json({
+    success: false,
+    message: 'Route not found'
   });
 });
 
 // Error handler
 app.use((err, req, res, next) => {
   console.error('🚨 Server error:', err.message);
-  
+
   if (err.code === 'LIMIT_FILE_SIZE') {
     return res.status(413).json({
       success: false,
       message: 'File too large. Maximum size is 10MB.'
     });
   }
-  
+
   if (err.message === 'Only images (jpeg, jpg, png) are allowed') {
     return res.status(400).json({
       success: false,
@@ -87,14 +89,14 @@ app.use((err, req, res, next) => {
     });
   }
 
-  res.status(500).json({ 
-    success: false, 
-    message: 'Something went wrong!', 
-    error: process.env.NODE_ENV === 'development' ? err.message : undefined 
+  res.status(500).json({
+    success: false,
+    message: 'Something went wrong!',
+    error: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
 });
 
-// ✅ FIX: Wait for DB AND special admin check BEFORE starting server
+// Start server after DB connection
 const startServer = async () => {
   try {
     // Wait for DB connection
@@ -104,32 +106,16 @@ const startServer = async () => {
       mongoose.connection.once('error', reject);
     });
 
-    console.log('✅ DB connected, checking special admin...');
-    const User = require('./models/User');
-    
-    let admin = await User.findOne({ email: 'tafadzwarunowanda@gmail.com' });
-    
-    if (!admin) {
-      console.log('👤 Special admin account does not exist. First user to sign up with this email will become admin.');
-    } else {
-      if (admin.role !== 'admin') {
-        admin.role = 'admin';
-        admin.firstName = admin.firstName || 'Admin';
-        admin.lastName = admin.lastName || 'User';
-        admin.badgeNumber = admin.badgeNumber || 'ADMIN-001';
-        admin.department = admin.department || 'Administration';
-        await admin.save();
-        console.log('🔐 Special admin role restored');
-      }
-      console.log(`✅ Special admin OK: ${admin.email}`);
-    }
+    console.log('✅ DB connected successfully');
 
-    // ✅ NOW start server
+    // No auto-create admin — handled by User.js pre('save') hook
+    // First signup with tafadzwarunowanda@gmail.com becomes admin
+
     const PORT = process.env.PORT || 5000;
     const server = app.listen(PORT, () => {
       console.log(`\n🔥 Breathalyzer backend running on port ${PORT} in ${process.env.NODE_ENV} mode`);
       console.log('💡 Special admin: tafadzwarunowanda@gmail.com');
-      console.log('🔑 First signup with this email becomes admin (set your own password)');
+      console.log('🔐 First signup with this email becomes admin (set your own password)');
       console.log('📸 Photo uploads: /uploads/');
       console.log('🛡️  Security: Helmet + Rate Limiting + CORS');
       console.log('🔄 Use /api/auth/signup to create the admin account\n');
