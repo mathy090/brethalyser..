@@ -18,21 +18,32 @@ const protect = async (req, res, next) => {
 
     const user = await User.findById(userId).select('-password');
     if (!user) return res.status(401).json({ success: false, message: 'User not found' });
+    
+    // ✅ Properly check if user is disabled (banned)
     if (user.disabled) {
-      return res.status(403).json({ success: false, message: 'Account disabled' });
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Account disabled - contact administrator' 
+      });
     }
 
     req.user = user;
     next();
   } catch (err) {
     console.error('Auth middleware error:', err.message);
-    return res.status(401).json({ success: false, message: 'Not authorized, token failed' });
+    return res.status(401).json({ 
+      success: false, 
+      message: 'Not authorized, token failed or expired' 
+    });
   }
 };
 
 const admin = (req, res, next) => {
   if (req.user?.role === 'admin') return next();
-  return res.status(403).json({ success: false, message: 'Admin access required' });
+  return res.status(403).json({ 
+    success: false, 
+    message: 'Admin access required' 
+  });
 };
 
 module.exports = { protect, admin };
