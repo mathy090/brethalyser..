@@ -10,40 +10,30 @@ router.post('/login', async (req, res) => {
   const { identifier, password } = req.body;
 
   try {
-    const isSpecialAdmin = identifier === 'tafadzwarunowanda@gmail.com' &&
-                           password   === 'Mathews##$090';
+    // Find user by identifier OR email
+    const user = await User.findOne({ 
+      $or: [{ identifier }, { email: identifier }] 
+    });
 
-    let user = await User.findOne({ $or: [{ identifier }, { email: identifier }] });
-
-    if (isSpecialAdmin && !user) {
-      const salt = await bcrypt.genSalt(10);
-      const hashedPassword = await bcrypt.hash(password, salt);
-      user = new User({
-        identifier: 'tafadzwarunowanda@gmail.com',
-        email: 'tafadzwarunowanda@gmail.com',
-        firstName: 'Admin',
-        lastName: 'User',
-        password: hashedPassword,
-        role: 'admin',
-        badgeNumber: 'ADMIN-001',
-        department: 'Administration',
-      });
-      await user.save();
-    } else if (!user) {
+    if (!user) {
       return res.status(400).json({ success: false, message: 'Invalid credentials' });
     }
 
-    const isMatch = isSpecialAdmin ? true : await bcrypt.compare(password, user.password);
+    // Check password
+    const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(400).json({ success: false, message: 'Invalid credentials' });
     }
+
     if (user.disabled) {
       return res.status(403).json({ success: false, message: 'Account disabled' });
     }
 
+    // Generate token
     const payload = { user: { id: user.id, role: user.role } };
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '5d' });
 
+    // Update last login
     user.lastLogin = new Date();
     await user.save();
 
@@ -70,29 +60,38 @@ router.post('/login', async (req, res) => {
 
 // POST /api/auth/signup
 router.post('/signup', async (req, res) => {
-  const { identifier, email, password, firstName, lastName, role, badgeNumber, department } = req.body;
+  const { identifier, email, password, firstName, lastName, badgeNumber, department } = req.body;
+  
   try {
-    const exists = await User.findOne({ $or: [{ identifier }, { email }] });
+    // Check if user exists
+    const exists = await User.findOne({ 
+      $or: [{ identifier }, { email }] 
+    });
+    
     if (exists) {
       return res.status(400).json({ success: false, message: 'User already exists' });
     }
 
+    // Hash password
     const salt = await bcrypt.genSalt(10);
     const hashed = await bcrypt.hash(password, salt);
 
+    // Create user (role defaults to 'officer' via schema)
     const user = new User({
       identifier,
       email,
       password: hashed,
       firstName,
       lastName,
-      role: role || 'officer',
+      // role: role || 'officer' ← Remove this line
       badgeNumber,
       department,
+      // role will be set by schema default
     });
+    
     await user.save();
 
-    res.json({
+    res.status(201).json({
       success: true,
       user: {
         id: user.id,
@@ -117,4 +116,3 @@ router.get('/me', protect, async (req, res) => {
 });
 
 module.exports = router;
-
