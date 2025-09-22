@@ -15,58 +15,66 @@ const syncOfflineRecords = async (req, res) => {
 
     for (const record of records) {
       try {
-        const required = ['idNumber','gender','identifier','numberPlate','alcoholLevel','location','deviceSerial'];
-        const missing = required.filter(k => record[k] === undefined || record[k] === null || record[k] === '');
-        if (missing.length) {
-          errors.push({ recordId: record.id || record.timestamp || 'unknown', error: `Missing fields: ${missing.join(', ')}` });
+        // Map frontend fields to backend schema
+        const {
+          driverName,
+          driverId,
+          alcoholConcentration,
+          fineAmount,
+          dateTime,
+          driverLicensePhoto,
+          notes,
+        } = record;
+
+        if (!driverName || !driverId || alcoholConcentration === undefined) {
+          errors.push({ recordId: record.id || 'unknown', error: 'Missing required fields: driverName, driverId, alcoholConcentration' });
           continue;
         }
 
-        const level = parseFloat(record.alcoholLevel);
+        const level = parseFloat(alcoholConcentration);
         if (isNaN(level) || level < 0 || level > 1.0) {
-          errors.push({ recordId: record.id || record.timestamp || 'unknown', error: 'Invalid alcohol level' });
+          errors.push({ recordId: record.id || 'unknown', error: 'Invalid alcohol level' });
           continue;
         }
 
-        // dedupe by timestamp+officer
-        let existing = null;
-        if (record.timestamp) {
-          existing = await TestRecord.findOne({ timestamp: new Date(record.timestamp), officerId: req.user.id });
-        }
-
+        // Deduplicate by timestamp + officer
+        const recordTimestamp = dateTime ? new Date(dateTime) : new Date();
+        const existing = await TestRecord.findOne({ timestamp: recordTimestamp, officerId: req.user.id });
         if (existing) {
           syncedCount++;
           continue;
         }
 
         const status = level > 0.08 ? 'exceeded' : 'normal';
+
         const newRecord = new TestRecord({
-          idNumber: record.idNumber,
-          gender: record.gender,
-          identifier: record.identifier,
-          numberPlate: record.numberPlate,
-          alcoholLevel: level,
-          location: record.location,
-          deviceSerial: record.deviceSerial,
-          notes: record.notes,
-          photo: record.photo,
-          status,
           officerId: req.user.id,
-          timestamp: record.timestamp ? new Date(record.timestamp) : new Date(),
-          source: record.source || 'mobile_app_offline_sync',
+          idNumber: driverId,
+          gender: 'Other', // or default, since frontend doesn’t send it
+          identifier: driverId,
+          numberPlate: '', // optional, can be empty
+          alcoholLevel: level,
+          fineAmount: fineAmount || 0,
+          location: '', // optional, can be empty
+          deviceSerial: '', // optional, can be empty
+          notes: notes || '',
+          photoUrl: driverLicensePhoto || null,
+          status,
+          timestamp: recordTimestamp,
+          source: 'mobile_app_offline_sync',
           synced: true,
         });
 
         await newRecord.save();
         syncedCount++;
-      } catch (e) {
-        errors.push({ recordId: record.id || record.timestamp || 'unknown', error: e.message || 'Unknown error' });
+      } catch (err) {
+        errors.push({ recordId: record.id || 'unknown', error: err.message || 'Unknown error' });
       }
     }
 
     res.status(200).json({
       success: true,
-      message: `Sync completed`,
+      message: 'Sync completed',
       synced: syncedCount,
       totalProcessed: records.length,
       errors,
@@ -79,8 +87,7 @@ const syncOfflineRecords = async (req, res) => {
 
 const getUnsyncedRecords = async (req, res) => {
   try {
-    const records = await TestRecord.find({ officerId: req.user.id, synced: false })
-      .sort({ timestamp: -1 });
+    const records = await TestRecord.find({ officerId: req.user.id, synced: false }).sort({ timestamp: -1 });
     res.status(200).json({ success: true, count: records.length, data: records });
   } catch (error) {
     console.error('Get unsynced records error:', error);
