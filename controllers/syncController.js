@@ -1,13 +1,26 @@
 const TestRecord = require('../models/TestRecord');
+const path = require('path');
+const fs = require('fs');
 
+// syncOfflineRecords handles multipart/form-data: photo + records array
 const syncOfflineRecords = async (req, res) => {
   try {
-    const records = req.body.records;
-    if (!Array.isArray(records)) {
-      return res.status(400).json({ success: false, message: 'Invalid data format. Expected array of records.' });
+    // Parse records from req.body (stringified JSON from FormData)
+    let records;
+    try {
+      records = JSON.parse(req.body.records);
+    } catch (err) {
+      return res.status(400).json({ success: false, message: 'Invalid records format' });
     }
-    if (records.length === 0) {
-      return res.status(200).json({ success: true, message: 'No records provided for sync.', synced: 0, errors: [] });
+
+    if (!Array.isArray(records) || records.length === 0) {
+      return res.status(400).json({ success: false, message: 'No records to sync' });
+    }
+
+    // Attach uploaded photo to the first record (assuming one photo per record)
+    if (req.file) {
+      const photoUrl = `/uploads/${req.file.filename}`;
+      records[0].driverLicensePhoto = photoUrl;
     }
 
     let syncedCount = 0;
@@ -15,7 +28,6 @@ const syncOfflineRecords = async (req, res) => {
 
     for (const record of records) {
       try {
-        // Map frontend fields to backend schema
         const {
           driverName,
           driverId,
@@ -24,10 +36,15 @@ const syncOfflineRecords = async (req, res) => {
           dateTime,
           driverLicensePhoto,
           notes,
+          gender,
         } = record;
 
+        // Validate required fields
         if (!driverName || !driverId || alcoholConcentration === undefined) {
-          errors.push({ recordId: record.id || 'unknown', error: 'Missing required fields: driverName, driverId, alcoholConcentration' });
+          errors.push({
+            recordId: record.id || 'unknown',
+            error: 'Missing required fields: driverName, driverId, alcoholConcentration'
+          });
           continue;
         }
 
@@ -50,13 +67,13 @@ const syncOfflineRecords = async (req, res) => {
         const newRecord = new TestRecord({
           officerId: req.user.id,
           idNumber: driverId,
-          gender: 'Other', // or default, since frontend doesn’t send it
+          gender: gender || 'Other',
           identifier: driverId,
-          numberPlate: '', // optional, can be empty
+          numberPlate: '',
           alcoholLevel: level,
           fineAmount: fineAmount || 0,
-          location: '', // optional, can be empty
-          deviceSerial: '', // optional, can be empty
+          location: '',
+          deviceSerial: '',
           notes: notes || '',
           photoUrl: driverLicensePhoto || null,
           status,
@@ -79,6 +96,7 @@ const syncOfflineRecords = async (req, res) => {
       totalProcessed: records.length,
       errors,
     });
+
   } catch (error) {
     console.error('Sync records error:', error);
     res.status(500).json({ success: false, message: 'Failed to sync records' });
@@ -96,3 +114,4 @@ const getUnsyncedRecords = async (req, res) => {
 };
 
 module.exports = { syncOfflineRecords, getUnsyncedRecords };
+
