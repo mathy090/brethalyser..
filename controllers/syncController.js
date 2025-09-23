@@ -24,7 +24,6 @@ const syncOfflineRecords = async (req, res) => {
           driverLicensePhoto,
           notes,
           gender,
-          officerId, // optional from frontend
         } = record;
 
         if (!driverName || !driverId || alcoholConcentration === undefined) {
@@ -40,18 +39,19 @@ const syncOfflineRecords = async (req, res) => {
 
         const recordTimestamp = dateTime ? new Date(dateTime) : new Date();
 
+        // No officerId check, just save
         const status = level > 0.08 ? 'exceeded' : 'normal';
 
         const newRecord = new TestRecord({
-          officerId: officerId || 'DEFAULT_OFFICER', // default if not provided
+          officerId: '', // leave empty or use a default value
           idNumber: driverId,
           gender: gender || 'Other',
-          identifier: driverName,
+          identifier: driverId,
           numberPlate: '',
           alcoholLevel: level,
           fineAmount: fineAmount || 0,
           location: '',
-          deviceSerial: 'MOBILE_APP',
+          deviceSerial: '',
           notes: notes || '',
           photoUrl: driverLicensePhoto || null,
           status,
@@ -80,5 +80,16 @@ const syncOfflineRecords = async (req, res) => {
   }
 };
 
-module.exports = { syncOfflineRecords };
+const getUnsyncedRecords = async (req, res) => {
+  try {
+    // Return all unsynced records, ignoring officerId
+    const records = await TestRecord.find({ synced: false }).sort({ timestamp: -1 });
+    res.status(200).json({ success: true, count: records.length, data: records });
+  } catch (error) {
+    console.error('Get unsynced records error:', error);
+    res.status(500).json({ success: false, message: 'Failed to retrieve unsynced records' });
+  }
+};
+
+module.exports = { syncOfflineRecords, getUnsyncedRecords };
 
