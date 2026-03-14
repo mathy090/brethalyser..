@@ -15,28 +15,36 @@ interface OfficerState {
 
 interface OfficerContextType {
   officer: OfficerState | null;
+  roleChanged: boolean;
   setOfficer: (o: OfficerState) => Promise<void>;
   clearOfficer: () => Promise<void>;
+  acknowledgeRoleChange: () => void;
 }
 
 const OfficerContext = createContext<OfficerContextType>({
   officer: null,
+  roleChanged: false,
   setOfficer: async () => {},
   clearOfficer: async () => {},
+  acknowledgeRoleChange: () => {},
 });
 
 export const useOfficer = () => useContext(OfficerContext);
 
 export function OfficerProvider({ children }: { children: React.ReactNode }) {
   const [officer, setOfficerState] = useState<OfficerState | null>(null);
+  const [roleChanged, setRoleChanged] = useState(false);
   const socketRef = useRef<Socket | null>(null);
+  const uidRef = useRef<string | null>(null);
 
-  const connectSocket = (o: OfficerState) => {
-    // Disconnect existing socket first
+  const connectSocket = (uid: string) => {
+    // Disconnect old socket
     if (socketRef.current) {
       socketRef.current.disconnect();
       socketRef.current = null;
     }
+
+    uidRef.current = uid;
 
     const socket = io(BACKEND_URL, {
       transports: ["websocket"],
@@ -48,42 +56,53 @@ export function OfficerProvider({ children }: { children: React.ReactNode }) {
     socketRef.current = socket;
 
     socket.on("connect", () => {
-      console.log("Socket connected, joining room:", o.uid);
-      socket.emit("join", o.uid);
+      console.log("Socket connected, joining room:", uid);
+      socket.emit("join", uid);
+    });
+
+    socket.on("reconnect", () => {
+      // Rejoin room after reconnect
+      if (uidRef.current) {
+        socket.emit("join", uidRef.current);
+      }
+    });
+
+    socket.on("roleUpdate", ({ role, status }: { role: Role; status: Status }) => {
+      console.log("Role update received:", role, status);
+      // Freeze session — force relogin
+      setRoleChanged(true);
     });
 
     socket.on("disconnect", () => {
       console.log("Socket disconnected");
-    });
-
-    // Backend pushed a role change — update state and cache instantly
-    socket.on("roleUpdate", async ({ role, status }: { role: Role; status: Status }) => {
-      console.log("Role update received:", role, status);
-      const updated: OfficerState = { ...o, role, status };
-      setOfficerState(updated);
-      await Cache.set("officer", updated);
     });
   };
 
   const setOfficer = async (o: OfficerState) => {
     setOfficerState(o);
     await Cache.set("officer", o);
-    connectSocket(o);
+    connectSocket(o.uid);
   };
 
   const clearOfficer = async () => {
     socketRef.current?.disconnect();
     socketRef.current = null;
+    uidRef.current = null;
     setOfficerState(null);
+    setRoleChanged(false);
     await Cache.remove("officer");
   };
 
-  // Restore session from cache on app start
+  const acknowledgeRoleChange = () => {
+    setRoleChanged(false);
+  };
+
+  // Restore session on app start
   useEffect(() => {
     Cache.get<OfficerState>("officer").then((cached) => {
       if (cached) {
         setOfficerState(cached);
-        connectSocket(cached);
+        connectSocket(cached.uid);
       }
     });
 
@@ -93,7 +112,7 @@ export function OfficerProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <OfficerContext.Provider value={{ officer, setOfficer, clearOfficer }}>
+    <OfficerContext.Provider value={{ officer, roleChanged, setOfficer, clearOfficer, acknowledgeRoleChange }}>
       {children}
     </OfficerContext.Provider>
   );
