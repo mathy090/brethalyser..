@@ -18,7 +18,7 @@ const api = axios.create({
 });
 
 export type AuthResult =
-  | { success: true; uid: string }
+  | { success: true; uid: string; role: string; status: string; officerId: string }
   | { success: false; error: string };
 
 export const registerOfficer = async (
@@ -29,9 +29,18 @@ export const registerOfficer = async (
   try {
     const { user }: { user: User } = await createUserWithEmailAndPassword(auth, email, password);
     await sendEmailVerification(user);
-    return { success: true, uid: user.uid };
+    const idToken = await user.getIdToken();
+
+    await api.post(
+      "/api/auth/register",
+      { officerId, email },
+      { headers: { Authorization: `Bearer ${idToken}` } }
+    );
+
+    return { success: true, uid: user.uid, role: "officer", status: "approved", officerId };
   } catch (error: any) {
-    return { success: false, error: error.message };
+    if (!error.response) return { success: false, error: "Network error. Check your connection." };
+    return { success: false, error: error.response?.data?.message || error.message };
   }
 };
 
@@ -47,7 +56,7 @@ export const loginOfficer = async (
     // Step 2 — Get Firebase ID token
     const idToken = await user.getIdToken();
 
-    // Step 3 — Send idToken in Authorization header, officerId in body
+    // Step 3 — Backend verifies token + checks MongoDB for role
     const { data } = await api.post(
       "/api/auth/login",
       { officerId },
@@ -56,11 +65,10 @@ export const loginOfficer = async (
 
     if (!data?.token) throw new Error("Backend did not return a token");
 
-    // Step 4 — Store JWT securely in Keychain
+    // Step 4 — Store JWT securely
     await storeToken(data.token);
     await storeOfficerId(officerId);
-
-    // Step 5 — Cache session for app restart
+    await Cache.set("refreshToken", data.refreshToken);
     await Cache.set("session", {
       uid: user.uid,
       officerId,
@@ -68,10 +76,41 @@ export const loginOfficer = async (
       lastLogin: Date.now(),
     });
 
-    return { success: true, uid: user.uid };
+    // Step 5 — Return role and status from backend
+    return {
+      success: true,
+      uid: user.uid,
+      role: data.role,
+      status: data.status,
+      officerId,
+    };
   } catch (error: any) {
-    await signOut(auth);
-    return { success: false, error: error.message };
+    await signOut(auth).catch(() => {});
+    if (!error.response && !error.code?.startsWith("auth/")) {
+      return { success: false, error: "Network error. Check your connection." };
+    }
+    if (error.code === "auth/invalid-credential" || error.code === "auth/wrong-password") {
+      return { success: false, error: "Invalid credentials." };
+    }
+    if (error.code === "auth/too-many-requests") {
+      return { success: false, error: "Too many attempts. Try again later." };
+    }
+    return { success: false, error: error.response?.data?.message || error.message || "Login failed." };
+  }
+};
+
+export const refreshJWT = async (): Promise<{ token: string; role: string; status: string } | null> => {
+  try {
+    const refreshToken = await Cache.get<string>("refreshToken");
+    if (!refreshToken) return null;
+    const { data } = await api.post("/api/auth/refresh", { refreshToken });
+    if (data?.token) {
+      await storeToken(data.token);
+      return { token: data.token, role: data.role, status: data.status };
+    }
+    return null;
+  } catch {
+    return null;
   }
 };
 
