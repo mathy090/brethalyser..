@@ -1,37 +1,33 @@
 import { Router, type Response } from "express";
+import { verifyJWT, requireRole, type AuthRequest } from "../middleware/verifyToken";
 import { Officer } from "../models/Officer";
-import { verifyJWT, type AuthRequest } from "../middleware/verifyToken";
 import { emitRoleUpdate } from "../config/socket";
 
 const router = Router();
 
-// Only superadmin can access
-const requireSuperAdmin = async (req: AuthRequest, res: Response, next: any): Promise<void> => {
-  const officer = await Officer.findOne({ firebaseUid: req.uid });
-  if (!officer || officer.role !== "superadmin") {
-    res.status(403).json({ message: "Superadmin access required" });
-    return;
-  }
-  next();
-};
-
-// GET /api/admin/officers — list all officers
-router.get("/officers", verifyJWT, requireSuperAdmin, async (_req: AuthRequest, res: Response): Promise<void> => {
+// GET /api/admin/officers
+router.get("/officers", verifyJWT, requireRole("admin", "superadmin"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const officers = await Officer.find({}, { firebaseUid: 0 });
-    res.status(200).json({ officers });
+    res.status(200).json(officers);
   } catch {
     res.status(500).json({ message: "Failed to fetch officers" });
   }
 });
 
-// PATCH /api/admin/promote — promote to admin, instant push to device
-router.patch("/promote", verifyJWT, requireSuperAdmin, async (req: AuthRequest, res: Response): Promise<void> => {
+// PATCH /api/admin/officers/:id/role — promote or demote
+router.patch("/officers/:id/role", verifyJWT, requireRole("superadmin"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { officerId } = req.body;
-    const officer = await Officer.findOneAndUpdate(
-      { officerId },
-      { role: "admin" },
+    const { role } = req.body;
+
+    if (!["officer", "admin", "superadmin"].includes(role)) {
+      res.status(400).json({ message: "Invalid role" });
+      return;
+    }
+
+    const officer = await Officer.findByIdAndUpdate(
+      req.params.id,
+      { role },
       { new: true }
     );
 
@@ -40,22 +36,28 @@ router.patch("/promote", verifyJWT, requireSuperAdmin, async (req: AuthRequest, 
       return;
     }
 
-    // Push to officer's device — tabs appear instantly
-    emitRoleUpdate(officer.firebaseUid, "admin");
+    // Push role change instantly to officer's app via WebSocket
+    emitRoleUpdate(officer.firebaseUid, officer.role, officer.status);
 
-    res.status(200).json({ message: "Officer promoted to admin", officer });
+    res.status(200).json({ message: "Role updated", officer });
   } catch {
-    res.status(500).json({ message: "Promotion failed" });
+    res.status(500).json({ message: "Failed to update role" });
   }
 });
 
-// PATCH /api/admin/demote — remove admin, instant push to device
-router.patch("/demote", verifyJWT, requireSuperAdmin, async (req: AuthRequest, res: Response): Promise<void> => {
+// PATCH /api/admin/officers/:id/status
+router.patch("/officers/:id/status", verifyJWT, requireRole("admin", "superadmin"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { officerId } = req.body;
-    const officer = await Officer.findOneAndUpdate(
-      { officerId },
-      { role: "officer" },
+    const { status } = req.body;
+
+    if (!["approved", "rejected", "pending"].includes(status)) {
+      res.status(400).json({ message: "Invalid status" });
+      return;
+    }
+
+    const officer = await Officer.findByIdAndUpdate(
+      req.params.id,
+      { status, approvedBy: req.officerId },
       { new: true }
     );
 
@@ -64,12 +66,11 @@ router.patch("/demote", verifyJWT, requireSuperAdmin, async (req: AuthRequest, r
       return;
     }
 
-    // Push to officer's device — tabs disappear instantly
-    emitRoleUpdate(officer.firebaseUid, "officer");
+    emitRoleUpdate(officer.firebaseUid, officer.role, officer.status);
 
-    res.status(200).json({ message: "Admin role removed", officer });
+    res.status(200).json({ message: "Status updated", officer });
   } catch {
-    res.status(500).json({ message: "Demotion failed" });
+    res.status(500).json({ message: "Failed to update status" });
   }
 });
 

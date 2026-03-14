@@ -6,24 +6,28 @@ let io: Server;
 export const initSocket = (server: HTTPServer): void => {
   io = new Server(server, {
     cors: { origin: "*" },
+    transports: ["websocket"],
   });
 
   io.on("connection", (socket) => {
+    // Officer joins their own private room using firebaseUid
     socket.on("join", (uid: string) => {
       socket.join(uid);
+      console.log(`Officer joined room: ${uid}`);
     });
-    socket.on("disconnect", () => {});
+
+    socket.on("disconnect", () => {
+      console.log("Socket disconnected");
+    });
   });
 };
 
-export const getIO = (): Server => {
-  if (!io) throw new Error("Socket not initialized");
-  return io;
-};
-
-// Push role change to officer's device instantly
-export const emitRoleUpdate = (firebaseUid: string, role: string): void => {
+// Call this when admin changes a role in MongoDB
+export const emitRoleUpdate = (firebaseUid: string, role: string, status: string): void => {
   if (io) {
-    io.to(firebaseUid).emit("role_updated", { role });
+    io.to(firebaseUid).emit("roleUpdate", { role, status });
+    console.log(`Role update emitted to ${firebaseUid}: ${role}`);
   }
 };
+
+export { io };
