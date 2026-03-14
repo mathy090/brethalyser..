@@ -3,7 +3,7 @@ import {
   Text, TextInput, TouchableOpacity,
   StyleSheet, ScrollView, Alert, ActivityIndicator,
 } from "react-native";
-import { loginOfficer } from "../services/authService";
+import { loginOfficer } from "../auth/authService";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { RootStackParamList } from "../navigation/AuthNavigator";
 

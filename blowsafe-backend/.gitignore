@@ -1,0 +1,10 @@
+.env
+.env.local
+serviceAccountKey.json
+secrets/
+node_modules/
+bun.lock
+dist/
+build/
+.DS_Store
+*.log

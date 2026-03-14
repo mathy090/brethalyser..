@@ -1,5 +1,6 @@
-import { initializeApp, getApps } from "firebase/app";
-import { getAuth } from "firebase/auth";
+import { initializeApp, getApps, getApp } from "firebase/app";
+import { initializeAuth, getAuth, getReactNativePersistence } from "firebase/auth";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   FIREBASE_API_KEY,
   FIREBASE_AUTH_DOMAIN,
@@ -18,8 +19,18 @@ const firebaseConfig = {
   appId: FIREBASE_APP_ID,
 };
 
-// Prevents duplicate init on hot reload
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+// Only initialize app once
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-export const auth = getAuth(app);
+// Only initialize auth once
+let auth: ReturnType<typeof getAuth>;
+try {
+  auth = initializeAuth(app, {
+    persistence: getReactNativePersistence(AsyncStorage),
+  });
+} catch {
+  auth = getAuth(app);
+}
+
+export { auth };
 export default app;

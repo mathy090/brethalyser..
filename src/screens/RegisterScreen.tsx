@@ -4,7 +4,7 @@ import {
   StyleSheet, ScrollView, Alert, ActivityIndicator,
 } from "react-native";
 import NetInfo from "@react-native-community/netinfo";
-import { registerOfficer } from "../services/authService";
+import { registerOfficer } from "../auth/authService";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { RootStackParamList } from "../navigation/AuthNavigator";
 
