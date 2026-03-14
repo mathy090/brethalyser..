@@ -47,16 +47,20 @@ export const loginOfficer = async (
     // Step 2 — Get Firebase ID token
     const idToken = await user.getIdToken();
 
-    // Step 3 — Send to backend, backend verifies with Firebase Admin SDK
-    const { data } = await api.post("/api/auth/login", { officerId, idToken });
+    // Step 3 — Send idToken in Authorization header, officerId in body
+    const { data } = await api.post(
+      "/api/auth/login",
+      { officerId },
+      { headers: { Authorization: `Bearer ${idToken}` } }
+    );
 
     if (!data?.token) throw new Error("Backend did not return a token");
 
-    // Step 4 — Store JWT in Keychain (secure hardware storage)
+    // Step 4 — Store JWT securely in Keychain
     await storeToken(data.token);
     await storeOfficerId(officerId);
 
-    // Step 5 — Cache session data for app restart
+    // Step 5 — Cache session for app restart
     await Cache.set("session", {
       uid: user.uid,
       officerId,

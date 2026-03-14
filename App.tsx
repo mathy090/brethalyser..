@@ -9,8 +9,11 @@ import AuthNavigator from "./src/navigation/AuthNavigator";
 import { auth } from "./src/auth/firebaseConfig";
 import { Cache } from "./src/utils/cache";
 import { getToken, clearSecureStorage } from "./src/security/secureStorage";
+import { refreshJWT } from "./src/auth/authService";
+import { OfficerProvider, useOfficer } from "./src/context/OfficerContext";
 
-export default function App() {
+function AppInner() {
+  const { setOfficer, clearOfficer } = useOfficer();
   const [loading, setLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
 
@@ -18,44 +21,51 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser: User | null) => {
       if (firebaseUser) {
         try {
-          // Get cached JWT from Keychain
           const token = await getToken();
-
           if (token) {
-            // Send JWT to backend to verify it is still valid
-            const { data } = await axios.post(
-              `${BACKEND_URL}/api/auth/verify`,
-              {},
-              { headers: { Authorization: `Bearer ${token}` } }
-            );
-
-            if (data?.valid) {
-              // Session restored — go straight to MainApp
-              await Cache.set("uid", firebaseUser.uid);
-              setIsAuthenticated(true);
-            } else {
-              // Backend rejected token
-              await clearSecureStorage();
-              await Cache.clear();
-              setIsAuthenticated(false);
+            try {
+              const { data } = await axios.post(
+                `${BACKEND_URL}/api/auth/verify`,
+                {},
+                { headers: { Authorization: `Bearer ${token}` } }
+              );
+              if (data?.valid) {
+                const cached = await Cache.get<any>("officer");
+                if (cached) await setOfficer(cached);
+                setIsAuthenticated(true);
+              } else {
+                throw new Error("Invalid");
+              }
+            } catch {
+              const refreshed = await refreshJWT();
+              if (refreshed) {
+                const cached = await Cache.get<any>("officer");
+                if (cached) {
+                  await setOfficer({ ...cached, role: refreshed.role, status: refreshed.status });
+                }
+                setIsAuthenticated(true);
+              } else {
+                await clearSecureStorage();
+                await Cache.clear();
+                await clearOfficer();
+                setIsAuthenticated(false);
+              }
             }
           } else {
-            // No token cached — needs fresh login
             setIsAuthenticated(false);
           }
         } catch {
-          // Token expired or backend error — force re-login
           await clearSecureStorage();
           await Cache.clear();
+          await clearOfficer();
           setIsAuthenticated(false);
         }
       } else {
-        // No Firebase user
         await clearSecureStorage();
         await Cache.clear();
+        await clearOfficer();
         setIsAuthenticated(false);
       }
-
       setLoading(false);
     });
 
@@ -71,10 +81,18 @@ export default function App() {
   }
 
   return (
+    <NavigationContainer>
+      <AuthNavigator isAuthenticated={isAuthenticated} />
+    </NavigationContainer>
+  );
+}
+
+export default function App() {
+  return (
     <SafeAreaProvider>
-      <NavigationContainer>
-        <AuthNavigator isAuthenticated={isAuthenticated} />
-      </NavigationContainer>
+      <OfficerProvider>
+        <AppInner />
+      </OfficerProvider>
     </SafeAreaProvider>
   );
 }

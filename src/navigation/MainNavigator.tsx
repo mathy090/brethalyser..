@@ -1,31 +1,49 @@
 import React from "react";
-import { View, Text, StyleSheet, Platform } from "react-native";
+import { View, Text, StyleSheet } from "react-native";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
-import { BlurView } from "@react-native-community/blur";
+import { useOfficer } from "../context/OfficerContext";
 
-// Screens
 import HomeScreen from "../screens/HomeScreen";
 import PrintScreen from "../screens/PrintScreen";
 import ServerScreen from "../screens/ServerScreen";
 import SettingsScreen from "../screens/SettingsScreen";
+import DashboardScreen from "../screens/DashboardScreen";
 
 const Tab = createBottomTabNavigator();
 
-// ── Icons (pure SVG — no icon library needed) ─────────────────────────
-const HomeIcon = ({ color }: { color: string }) => (
-  <Text style={{ fontSize: 22, color }}>⌂</Text>
-);
-const PrintIcon = ({ color }: { color: string }) => (
-  <Text style={{ fontSize: 22, color }}>⎙</Text>
-);
-const ServerIcon = ({ color }: { color: string }) => (
-  <Text style={{ fontSize: 22, color }}>⬡</Text>
-);
-const SettingsIcon = ({ color }: { color: string }) => (
-  <Text style={{ fontSize: 22, color }}>⚙</Text>
+const Icon = ({ label, color }: { label: string; color: string }) => (
+  <Text style={{ fontSize: 20, color }}>{label}</Text>
 );
 
+function LockedScreen() {
+  return (
+    <View style={locked.container}>
+      <Text style={locked.icon}>🔒</Text>
+      <Text style={locked.title}>Access Restricted</Text>
+      <Text style={locked.sub}>
+        Your account is pending approval. This feature will unlock once approved.
+      </Text>
+    </View>
+  );
+}
+
+const locked = StyleSheet.create({
+  container: { flex: 1, backgroundColor: "#121212", justifyContent: "center", alignItems: "center", padding: 30 },
+  icon: { fontSize: 48, marginBottom: 20 },
+  title: { color: "#fff", fontSize: 20, fontWeight: "bold", marginBottom: 10 },
+  sub: { color: "#666", fontSize: 14, textAlign: "center", lineHeight: 22 },
+});
+
 export default function MainNavigator() {
+  const { officer } = useOfficer();
+
+  const role = officer?.role ?? "officer";
+  const status = officer?.status ?? "pending";
+
+  const isApproved = status === "approved";
+  const isAdmin = role === "admin" || role === "superadmin";
+  const isSuperAdmin = role === "superadmin";
+
   return (
     <Tab.Navigator
       screenOptions={{
@@ -35,38 +53,41 @@ export default function MainNavigator() {
         tabBarInactiveTintColor: "rgba(255,255,255,0.4)",
         tabBarLabelStyle: styles.label,
         tabBarStyle: styles.tabBar,
-        tabBarBackground: () => (
-          <View style={styles.tabBarBackground} />
-        ),
+        tabBarBackground: () => <View style={styles.tabBarBg} />,
       }}
     >
       <Tab.Screen
         name="Home"
         component={HomeScreen}
-        options={{
-          tabBarIcon: ({ color }) => <HomeIcon color={color} />,
-        }}
+        options={{ tabBarIcon: ({ color }) => <Icon label="⌂" color={color} /> }}
       />
+
       <Tab.Screen
         name="Print"
-        component={PrintScreen}
-        options={{
-          tabBarIcon: ({ color }) => <PrintIcon color={color} />,
-        }}
+        component={isApproved ? PrintScreen : LockedScreen}
+        options={{ tabBarIcon: ({ color }) => <Icon label="⎙" color={color} /> }}
       />
-      <Tab.Screen
-        name="Server"
-        component={ServerScreen}
-        options={{
-          tabBarIcon: ({ color }) => <ServerIcon color={color} />,
-        }}
-      />
+
+      {isAdmin && (
+        <Tab.Screen
+          name="Server"
+          component={ServerScreen}
+          options={{ tabBarIcon: ({ color }) => <Icon label="⬡" color={color} /> }}
+        />
+      )}
+
+      {isSuperAdmin && (
+        <Tab.Screen
+          name="Dashboard"
+          component={DashboardScreen}
+          options={{ tabBarIcon: ({ color }) => <Icon label="◈" color={color} /> }}
+        />
+      )}
+
       <Tab.Screen
         name="Settings"
         component={SettingsScreen}
-        options={{
-          tabBarIcon: ({ color }) => <SettingsIcon color={color} />,
-        }}
+        options={{ tabBarIcon: ({ color }) => <Icon label="⚙" color={color} /> }}
       />
     </Tab.Navigator>
   );
@@ -88,17 +109,13 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 20,
   },
-  tabBarBackground: {
+  tabBarBg: {
     flex: 1,
     borderRadius: 30,
     overflow: "hidden",
-    backgroundColor: "rgba(18,18,18,0.75)",
+    backgroundColor: "rgba(18,18,18,0.85)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.08)",
   },
-  label: {
-    fontSize: 11,
-    fontWeight: "600",
-    marginBottom: 6,
-  },
+  label: { fontSize: 11, fontWeight: "600", marginBottom: 6 },
 });
