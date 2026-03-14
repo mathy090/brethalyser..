@@ -34,20 +34,32 @@ router.post("/login", rateLimiter, verifyFirebaseToken, async (req: AuthRequest,
   try {
     const { officerId } = req.body;
 
-    // Check email verified
+    // Step 1 — Firebase Admin gets full user info
     const firebaseUser = await admin.auth().getUser(req.uid!);
+
+    // Step 2 — Check email verified
     if (!firebaseUser.emailVerified) {
       res.status(403).json({ message: "Email not verified. Check your inbox." });
       return;
     }
 
-    // Find officer — auto create if doesn't exist (handles legacy accounts)
+    // Step 3 — Find officer in MongoDB by firebaseUid
     let officer = await Officer.findOne({ firebaseUid: req.uid });
 
-    if (!officer) {
-      // Auto register legacy Firebase account into MongoDB
+    if (officer) {
+      // Officer exists — use their existing role and status
+      // Just update officerId in case it changed
+      if (officer.officerId !== officerId) {
+        officer = await Officer.findOneAndUpdate(
+          { firebaseUid: req.uid },
+          { officerId },
+          { new: true }
+        ) ?? officer;
+      }
+    } else {
+      // Officer not found — create new with default role
       officer = await Officer.create({
-        officerId: officerId,
+        officerId,
         email: firebaseUser.email,
         firebaseUid: req.uid,
         role: "officer",
@@ -55,27 +67,31 @@ router.post("/login", rateLimiter, verifyFirebaseToken, async (req: AuthRequest,
       });
     }
 
-    // Update officerId if changed
-    if (officer.officerId !== officerId) {
-      officer = await Officer.findOneAndUpdate(
-        { firebaseUid: req.uid },
-        { officerId },
-        { new: true }
-      ) ?? officer;
-    }
-
+    // Step 4 — Issue JWT with role from MongoDB
     const token = jwt.sign(
-      { uid: req.uid, officerId: officer.officerId, role: officer.role, status: officer.status },
+      {
+        uid: req.uid,
+        officerId: officer.officerId,
+        role: officer.role,
+        status: officer.status,
+      },
       process.env.JWT_SECRET!,
       { expiresIn: process.env.JWT_EXPIRES_IN ?? "7d" }
     );
 
     const refreshToken = jwt.sign(
-      { uid: req.uid, officerId: officer.officerId, role: officer.role, status: officer.status, type: "refresh" },
+      {
+        uid: req.uid,
+        officerId: officer.officerId,
+        role: officer.role,
+        status: officer.status,
+        type: "refresh",
+      },
       process.env.JWT_SECRET!,
       { expiresIn: "30d" }
     );
 
+    // Step 5 — Return token + role to frontend
     res.status(200).json({
       token,
       refreshToken,
@@ -110,6 +126,7 @@ router.post("/refresh", async (req: AuthRequest, res: Response): Promise<void> =
       return;
     }
 
+    // Always fetch latest role from MongoDB
     const officer = await Officer.findOne({ firebaseUid: decoded.uid });
     if (!officer) {
       res.status(403).json({ message: "Officer not found" });
@@ -117,7 +134,12 @@ router.post("/refresh", async (req: AuthRequest, res: Response): Promise<void> =
     }
 
     const newToken = jwt.sign(
-      { uid: decoded.uid, officerId: officer.officerId, role: officer.role, status: officer.status },
+      {
+        uid: decoded.uid,
+        officerId: officer.officerId,
+        role: officer.role,
+        status: officer.status,
+      },
       process.env.JWT_SECRET!,
       { expiresIn: process.env.JWT_EXPIRES_IN ?? "7d" }
     );
