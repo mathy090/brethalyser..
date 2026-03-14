@@ -36,9 +36,7 @@ router.patch("/officers/:id/role", verifyJWT, requireRole("superadmin"), async (
       return;
     }
 
-    // Push role change instantly to officer's app via WebSocket
     emitRoleUpdate(officer.firebaseUid, officer.role, officer.status);
-
     res.status(200).json({ message: "Role updated", officer });
   } catch {
     res.status(500).json({ message: "Failed to update role" });
@@ -67,11 +65,31 @@ router.patch("/officers/:id/status", verifyJWT, requireRole("admin", "superadmin
     }
 
     emitRoleUpdate(officer.firebaseUid, officer.role, officer.status);
-
     res.status(200).json({ message: "Status updated", officer });
   } catch {
     res.status(500).json({ message: "Failed to update status" });
   }
+});
+
+// POST /api/admin/trigger-role-update
+// Called by MongoDB Atlas trigger when role changes manually in Atlas
+router.post("/trigger-role-update", (req: AuthRequest, res: Response): void => {
+  const secret = req.headers["x-trigger-secret"];
+
+  if (secret !== process.env.TRIGGER_SECRET) {
+    res.status(401).json({ message: "Unauthorized" });
+    return;
+  }
+
+  const { firebaseUid, role, status } = req.body;
+
+  if (!firebaseUid || !role || !status) {
+    res.status(400).json({ message: "Missing fields" });
+    return;
+  }
+
+  emitRoleUpdate(firebaseUid, role, status);
+  res.status(200).json({ message: "Role update emitted" });
 });
 
 export default router;
