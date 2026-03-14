@@ -7,7 +7,6 @@ import admin from "../config/firebase";
 
 const router = Router();
 
-// POST /api/auth/register
 router.post("/register", rateLimiter, verifyFirebaseToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { officerId, email } = req.body;
@@ -31,7 +30,6 @@ router.post("/register", rateLimiter, verifyFirebaseToken, async (req: AuthReque
   }
 });
 
-// POST /api/auth/login
 router.post("/login", rateLimiter, verifyFirebaseToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { officerId } = req.body;
@@ -43,22 +41,37 @@ router.post("/login", rateLimiter, verifyFirebaseToken, async (req: AuthRequest,
       return;
     }
 
-    // Check officer exists in MongoDB
-    const officer = await Officer.findOne({ officerId, firebaseUid: req.uid });
+    // Find officer — auto create if doesn't exist (handles legacy accounts)
+    let officer = await Officer.findOne({ firebaseUid: req.uid });
+
     if (!officer) {
-      res.status(403).json({ message: "Officer not found. Contact your administrator." });
-      return;
+      // Auto register legacy Firebase account into MongoDB
+      officer = await Officer.create({
+        officerId: officerId,
+        email: firebaseUser.email,
+        firebaseUid: req.uid,
+        role: "officer",
+        status: "approved",
+      });
     }
 
-    // JWT includes role — frontend uses this to show/hide tabs
+    // Update officerId if changed
+    if (officer.officerId !== officerId) {
+      officer = await Officer.findOneAndUpdate(
+        { firebaseUid: req.uid },
+        { officerId },
+        { new: true }
+      ) ?? officer;
+    }
+
     const token = jwt.sign(
-      { uid: req.uid, officerId: officer.officerId, role: officer.role },
+      { uid: req.uid, officerId: officer.officerId, role: officer.role, status: officer.status },
       process.env.JWT_SECRET!,
       { expiresIn: process.env.JWT_EXPIRES_IN ?? "7d" }
     );
 
     const refreshToken = jwt.sign(
-      { uid: req.uid, officerId: officer.officerId, role: officer.role, type: "refresh" },
+      { uid: req.uid, officerId: officer.officerId, role: officer.role, status: officer.status, type: "refresh" },
       process.env.JWT_SECRET!,
       { expiresIn: "30d" }
     );
@@ -67,14 +80,15 @@ router.post("/login", rateLimiter, verifyFirebaseToken, async (req: AuthRequest,
       token,
       refreshToken,
       role: officer.role,
+      status: officer.status,
       uid: req.uid,
     });
-  } catch {
+  } catch (err) {
+    console.error("Login error:", err);
     res.status(500).json({ message: "Login failed" });
   }
 });
 
-// POST /api/auth/refresh — always fetch latest role from DB
 router.post("/refresh", async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { refreshToken } = req.body;
@@ -86,6 +100,8 @@ router.post("/refresh", async (req: AuthRequest, res: Response): Promise<void> =
     const decoded = jwt.verify(refreshToken, process.env.JWT_SECRET!) as {
       uid: string;
       officerId: string;
+      role: string;
+      status: string;
       type: string;
     };
 
@@ -94,26 +110,28 @@ router.post("/refresh", async (req: AuthRequest, res: Response): Promise<void> =
       return;
     }
 
-    // Always fetch latest role from DB — catches promotions/demotions
-    const officer = await Officer.findOne({ officerId: decoded.officerId, firebaseUid: decoded.uid });
+    const officer = await Officer.findOne({ firebaseUid: decoded.uid });
     if (!officer) {
       res.status(403).json({ message: "Officer not found" });
       return;
     }
 
     const newToken = jwt.sign(
-      { uid: decoded.uid, officerId: officer.officerId, role: officer.role },
+      { uid: decoded.uid, officerId: officer.officerId, role: officer.role, status: officer.status },
       process.env.JWT_SECRET!,
       { expiresIn: process.env.JWT_EXPIRES_IN ?? "7d" }
     );
 
-    res.status(200).json({ token: newToken, role: officer.role });
+    res.status(200).json({
+      token: newToken,
+      role: officer.role,
+      status: officer.status,
+    });
   } catch {
     res.status(401).json({ message: "Invalid or expired refresh token" });
   }
 });
 
-// POST /api/auth/verify
 router.post("/verify", verifyJWT, (req: AuthRequest, res: Response): void => {
   res.status(200).json({
     valid: true,
