@@ -1,7 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-// Only for non-sensitive flags (e.g. verified status, preferences)
-// Secrets always go to secureStorage.ts (Keychain)
 const PREFIX = "blowsafe_";
 
 export const Cache = {

@@ -1,18 +1,16 @@
-import { Router, type Request, type Response } from "express";
+import { Router, type Response } from "express";
 import admin from "../config/firebase";
 import jwt from "jsonwebtoken";
-import { verifyFirebaseToken, type AuthRequest } from "../middleware/verifyToken";
+import { verifyFirebaseToken, verifyJWT, type AuthRequest } from "../middleware/verifyToken";
 
 const router = Router();
 
 /**
  * POST /api/auth/login
- *
- * Flow:
- * 1. Client sends Firebase ID token
- * 2. We verify it with Firebase Admin SDK
- * 3. We issue our own signed JWT back
- * 4. MongoDB officer lookup comes later — verification first
+ * 1. Firebase Admin SDK verifies the ID token
+ * 2. We issue our own JWT and store it
+ * 3. Frontend stores it in Keychain
+ * 4. Every future request compares Bearer JWT against JWT_SECRET
  */
 router.post("/login", verifyFirebaseToken, (req: AuthRequest, res: Response): void => {
   try {
@@ -37,22 +35,17 @@ router.post("/login", verifyFirebaseToken, (req: AuthRequest, res: Response): vo
 
 /**
  * POST /api/auth/verify
- * Lightweight endpoint to check if a JWT is still valid
- * Used on app startup to decide if user can skip login
+ * Frontend sends its cached JWT
+ * Backend checks it against JWT_SECRET
+ * If valid — session restored, no re-login needed
+ * If invalid/expired — frontend clears cache and sends to login
  */
-router.post("/verify", (req: Request, res: Response): void => {
-  const header = req.headers.authorization;
-  if (!header?.startsWith("Bearer ")) {
-    res.status(401).json({ valid: false });
-    return;
-  }
-
-  try {
-    const decoded = jwt.verify(header.split(" ")[1], process.env.JWT_SECRET!);
-    res.status(200).json({ valid: true, decoded });
-  } catch {
-    res.status(401).json({ valid: false });
-  }
+router.post("/verify", verifyJWT, (req: AuthRequest, res: Response): void => {
+  res.status(200).json({
+    valid: true,
+    uid: req.uid,
+    officerId: req.officerId,
+  });
 });
 
 export default router;

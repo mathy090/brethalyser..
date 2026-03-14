@@ -3,27 +3,62 @@ import { View, ActivityIndicator, StyleSheet } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { NavigationContainer } from "@react-navigation/native";
 import { onAuthStateChanged, User } from "firebase/auth";
+import axios from "axios";
+import { BACKEND_URL } from "@env";
 import AuthNavigator from "./src/navigation/AuthNavigator";
 import { auth } from "./src/auth/firebaseConfig";
 import { Cache } from "./src/utils/cache";
+import { getToken, clearSecureStorage } from "./src/security/secureStorage";
 
 export default function App() {
   const [loading, setLoading] = useState(true);
-  const [user, setUser] = useState<User | null>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser: User | null) => {
       if (firebaseUser) {
-        await Cache.set("uid", firebaseUser.uid);
-        setUser(firebaseUser);
+        try {
+          // Get cached JWT from Keychain
+          const token = await getToken();
+
+          if (token) {
+            // Send JWT to backend to verify it is still valid
+            const { data } = await axios.post(
+              `${BACKEND_URL}/api/auth/verify`,
+              {},
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+
+            if (data?.valid) {
+              // Session restored — go straight to MainApp
+              await Cache.set("uid", firebaseUser.uid);
+              setIsAuthenticated(true);
+            } else {
+              // Backend rejected token
+              await clearSecureStorage();
+              await Cache.clear();
+              setIsAuthenticated(false);
+            }
+          } else {
+            // No token cached — needs fresh login
+            setIsAuthenticated(false);
+          }
+        } catch {
+          // Token expired or backend error — force re-login
+          await clearSecureStorage();
+          await Cache.clear();
+          setIsAuthenticated(false);
+        }
       } else {
+        // No Firebase user
+        await clearSecureStorage();
         await Cache.clear();
-        setUser(null);
+        setIsAuthenticated(false);
       }
+
       setLoading(false);
     });
 
-    // Cleanup listener on unmount
     return () => unsubscribe();
   }, []);
 
@@ -38,7 +73,7 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <NavigationContainer>
-        <AuthNavigator />
+        <AuthNavigator isAuthenticated={isAuthenticated} />
       </NavigationContainer>
     </SafeAreaProvider>
   );

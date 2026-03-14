@@ -18,6 +18,7 @@ export default function LoginScreen({ navigation, route }: Props) {
   const [password, setPassword] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState("");
 
   const routeError = route.params?.error;
 
@@ -33,8 +34,13 @@ export default function LoginScreen({ navigation, route }: Props) {
   const handleLogin = async () => {
     if (!validate()) return;
     setLoading(true);
+
+    // Show user what step we are on
+    setStatus("Verifying credentials...");
     const result = await loginOfficer(officerId, email.trim().toLowerCase(), password);
+
     setLoading(false);
+    setStatus("");
 
     if (result.success) {
       navigation.replace("MainApp");
@@ -44,7 +50,11 @@ export default function LoginScreen({ navigation, route }: Props) {
   };
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.content}
+      keyboardShouldPersistTaps="handled"
+    >
       <Text style={styles.title}>Official Sign In</Text>
 
       {routeError && <Text style={styles.banner}>{routeError}</Text>}
@@ -64,8 +74,17 @@ export default function LoginScreen({ navigation, route }: Props) {
         secureTextEntry editable={!loading} />
       {errors.password && <Text style={styles.error}>{errors.password}</Text>}
 
-      <TouchableOpacity style={[styles.btn, loading && styles.btnDisabled]} onPress={handleLogin} disabled={loading}>
-        {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnText}>Sign In</Text>}
+      {status ? <Text style={styles.status}>{status}</Text> : null}
+
+      <TouchableOpacity
+        style={[styles.btn, loading && styles.btnDisabled]}
+        onPress={handleLogin}
+        disabled={loading}
+      >
+        {loading
+          ? <ActivityIndicator color="#fff" />
+          : <Text style={styles.btnText}>Sign In</Text>
+        }
       </TouchableOpacity>
     </ScrollView>
   );
@@ -78,6 +97,7 @@ const styles = StyleSheet.create({
   banner: { backgroundColor: "#FF4C4C", color: "#fff", padding: 10, borderRadius: 6, marginBottom: 16, textAlign: "center" },
   input: { backgroundColor: "#1e1e1e", color: "#fff", borderRadius: 8, padding: 14, marginBottom: 4, fontSize: 15 },
   error: { color: "#FF4C4C", fontSize: 12, marginBottom: 10 },
+  status: { color: "#1DB954", fontSize: 13, textAlign: "center", marginTop: 10 },
   btn: { backgroundColor: "#1DB954", padding: 15, borderRadius: 25, alignItems: "center", marginTop: 24 },
   btnDisabled: { opacity: 0.6 },
   btnText: { color: "#fff", fontSize: 17, fontWeight: "bold" },
