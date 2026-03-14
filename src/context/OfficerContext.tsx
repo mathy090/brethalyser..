@@ -31,24 +31,44 @@ export function OfficerProvider({ children }: { children: React.ReactNode }) {
   const [officer, setOfficerState] = useState<OfficerState | null>(null);
   const socketRef = useRef<Socket | null>(null);
 
-  const setOfficer = async (o: OfficerState) => {
-    setOfficerState(o);
-    await Cache.set("officer", o);
+  const connectSocket = (o: OfficerState) => {
+    // Disconnect existing socket first
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
 
-    if (socketRef.current) socketRef.current.disconnect();
+    const socket = io(BACKEND_URL, {
+      transports: ["websocket"],
+      reconnection: true,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 2000,
+    });
 
-    const socket = io(BACKEND_URL, { transports: ["websocket"] });
     socketRef.current = socket;
 
     socket.on("connect", () => {
+      console.log("Socket connected, joining room:", o.uid);
       socket.emit("join", o.uid);
     });
 
+    socket.on("disconnect", () => {
+      console.log("Socket disconnected");
+    });
+
+    // Backend pushed a role change — update state and cache instantly
     socket.on("roleUpdate", async ({ role, status }: { role: Role; status: Status }) => {
-      const updated = { ...o, role, status };
+      console.log("Role update received:", role, status);
+      const updated: OfficerState = { ...o, role, status };
       setOfficerState(updated);
       await Cache.set("officer", updated);
     });
+  };
+
+  const setOfficer = async (o: OfficerState) => {
+    setOfficerState(o);
+    await Cache.set("officer", o);
+    connectSocket(o);
   };
 
   const clearOfficer = async () => {
@@ -58,11 +78,18 @@ export function OfficerProvider({ children }: { children: React.ReactNode }) {
     await Cache.remove("officer");
   };
 
+  // Restore session from cache on app start
   useEffect(() => {
     Cache.get<OfficerState>("officer").then((cached) => {
-      if (cached) setOfficer(cached);
+      if (cached) {
+        setOfficerState(cached);
+        connectSocket(cached);
+      }
     });
-    return () => { socketRef.current?.disconnect(); };
+
+    return () => {
+      socketRef.current?.disconnect();
+    };
   }, []);
 
   return (
