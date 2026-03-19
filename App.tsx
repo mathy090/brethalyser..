@@ -41,7 +41,11 @@ function AppInner() {
               if (refreshed) {
                 const cached = await Cache.get<any>("officer");
                 if (cached) {
-                  await setOfficer({ ...cached, role: refreshed.role, status: refreshed.status });
+                  await setOfficer({
+                    ...cached,
+                    role: refreshed.role,
+                    status: refreshed.status,
+                  });
                 }
                 setIsAuthenticated(true);
               } else {

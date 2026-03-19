@@ -6,14 +6,14 @@ import { Cache } from "../utils/cache";
 export type Role = "officer" | "admin" | "superadmin";
 export type Status = "pending" | "approved" | "rejected";
 
-interface OfficerState {
+export interface OfficerState {
   uid: string;
   officerId: string;
   role: Role;
   status: Status;
 }
 
-interface OfficerContextType {
+export interface OfficerContextType {
   officer: OfficerState | null;
   roleChanged: boolean;
   setOfficer: (o: OfficerState) => Promise<void>;
@@ -38,7 +38,6 @@ export function OfficerProvider({ children }: { children: React.ReactNode }) {
   const uidRef = useRef<string | null>(null);
 
   const connectSocket = (uid: string) => {
-    // Disconnect old socket
     if (socketRef.current) {
       socketRef.current.disconnect();
       socketRef.current = null;
@@ -61,15 +60,13 @@ export function OfficerProvider({ children }: { children: React.ReactNode }) {
     });
 
     socket.on("reconnect", () => {
-      // Rejoin room after reconnect
       if (uidRef.current) {
         socket.emit("join", uidRef.current);
       }
     });
 
-    socket.on("roleUpdate", ({ role, status }: { role: Role; status: Status }) => {
-      console.log("Role update received:", role, status);
-      // Freeze session — force relogin
+    socket.on("roleUpdate", () => {
+      console.log("Role update received — freezing session");
       setRoleChanged(true);
     });
 
@@ -97,7 +94,6 @@ export function OfficerProvider({ children }: { children: React.ReactNode }) {
     setRoleChanged(false);
   };
 
-  // Restore session on app start
   useEffect(() => {
     Cache.get<OfficerState>("officer").then((cached) => {
       if (cached) {
@@ -105,14 +101,19 @@ export function OfficerProvider({ children }: { children: React.ReactNode }) {
         connectSocket(cached.uid);
       }
     });
-
     return () => {
       socketRef.current?.disconnect();
     };
   }, []);
 
   return (
-    <OfficerContext.Provider value={{ officer, roleChanged, setOfficer, clearOfficer, acknowledgeRoleChange }}>
+    <OfficerContext.Provider value={{
+      officer,
+      roleChanged,
+      setOfficer,
+      clearOfficer,
+      acknowledgeRoleChange,
+    }}>
       {children}
     </OfficerContext.Provider>
   );

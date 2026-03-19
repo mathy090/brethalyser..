@@ -4,6 +4,7 @@ import {
   StyleSheet, ScrollView, Alert, ActivityIndicator,
 } from "react-native";
 import { loginOfficer } from "../auth/authService";
+import { useOfficer } from "../context/OfficerContext";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { RootStackParamList } from "../navigation/AuthNavigator";
 
@@ -13,13 +14,13 @@ const validateOfficerId = (id: string) => /^[A-Z]{1}\d{6}[A-Z]{1}$|^\d{9}$/i.tes
 const validateEmail = (e: string) => /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,4}$/.test(e);
 
 export default function LoginScreen({ navigation, route }: Props) {
+  const { setOfficer } = useOfficer();
   const [officerId, setOfficerId] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("");
-
   const routeError = route.params?.error;
 
   const validate = () => {
@@ -34,15 +35,24 @@ export default function LoginScreen({ navigation, route }: Props) {
   const handleLogin = async () => {
     if (!validate()) return;
     setLoading(true);
-
-    // Show user what step we are on
     setStatus("Verifying credentials...");
-    const result = await loginOfficer(officerId, email.trim().toLowerCase(), password);
+
+    const result = await loginOfficer(
+      officerId,
+      email.trim().toLowerCase(),
+      password
+    );
 
     setLoading(false);
     setStatus("");
 
     if (result.success) {
+      await setOfficer({
+        uid: result.uid,
+        officerId: result.officerId,
+        role: result.role as any,
+        status: result.status as any,
+      });
       navigation.replace("MainApp");
     } else {
       Alert.alert("Login Failed", result.error);
@@ -56,7 +66,6 @@ export default function LoginScreen({ navigation, route }: Props) {
       keyboardShouldPersistTaps="handled"
     >
       <Text style={styles.title}>Official Sign In</Text>
-
       {routeError && <Text style={styles.banner}>{routeError}</Text>}
 
       <TextInput style={styles.input} placeholder="Officer ID"

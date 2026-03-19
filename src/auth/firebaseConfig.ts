@@ -1,5 +1,9 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { initializeAuth, getAuth, getReactNativePersistence } from "firebase/auth";
+import {
+  initializeAuth,
+  getAuth,
+  getReactNativePersistence,
+} from "firebase/auth";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   FIREBASE_API_KEY,
@@ -10,27 +14,36 @@ import {
   FIREBASE_APP_ID,
 } from "@env";
 
-const firebaseConfig = {
-  apiKey: FIREBASE_API_KEY,
-  authDomain: FIREBASE_AUTH_DOMAIN,
-  projectId: FIREBASE_PROJECT_ID,
-  storageBucket: FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: FIREBASE_MESSAGING_SENDER_ID,
-  appId: FIREBASE_APP_ID,
-};
-
-// Only initialize app once
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-
-// Only initialize auth once
-let auth: ReturnType<typeof getAuth>;
-try {
-  auth = initializeAuth(app, {
-    persistence: getReactNativePersistence(AsyncStorage),
-  });
-} catch {
-  auth = getAuth(app);
+// ✅ Validate ENV (prevents invalid-api-key crash)
+if (!FIREBASE_API_KEY) {
+  throw new Error("🔥 FIREBASE_API_KEY is missing from .env");
 }
 
-export { auth };
+const firebaseConfig = {
+  apiKey: FIREBASE_API_KEY?.trim(),
+  authDomain: FIREBASE_AUTH_DOMAIN?.trim(),
+  projectId: FIREBASE_PROJECT_ID?.trim(),
+  storageBucket: FIREBASE_STORAGE_BUCKET?.trim(),
+  messagingSenderId: FIREBASE_MESSAGING_SENDER_ID?.trim(),
+  appId: FIREBASE_APP_ID?.trim(),
+};
+
+// ✅ Initialize app once
+const app =
+  getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+
+// ✅ Ensure SINGLE auth instance (fixes onAuth crash)
+let authInstance;
+
+try {
+  authInstance = initializeAuth(app, {
+    persistence: getReactNativePersistence(AsyncStorage),
+  });
+} catch (e) {
+  // Already initialized → fallback safely
+  authInstance = getAuth(app);
+}
+
+// ✅ Export stable auth
+export const auth = authInstance;
 export default app;

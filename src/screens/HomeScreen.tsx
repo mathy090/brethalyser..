@@ -6,10 +6,19 @@ import {
   StatusBar,
   Image,
   TouchableOpacity,
+  ScrollView,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+
 import { useOfficer } from "../context/OfficerContext";
 import { useNetworkStatus } from "../helpers/network";
+
+// 🔌 Import new components
+import DriverCard from "../features/home/DriverCard";
+import LicensePreview from "../features/home/LicensePreview";
+import DataRow from "../features/home/DataRow";
+import ActionButtons from "../features/home/ActionButtons";
+import StatusBox from "../features/home/StatusBox";
 
 export default function HomeScreen() {
   const { officer } = useOfficer();
@@ -19,10 +28,8 @@ export default function HomeScreen() {
     <SafeAreaView style={styles.root} edges={["top"]}>
       <StatusBar barStyle="light-content" backgroundColor="#121212" />
 
-      {/* Top bar */}
+      {/* 🔝 Top bar (UNCHANGED) */}
       <View style={styles.topBar}>
-
-        {/* Left — round avatar icon */}
         <TouchableOpacity style={styles.avatarContainer}>
           <Image
             source={require("../../assets/background.png")}
@@ -30,25 +37,53 @@ export default function HomeScreen() {
           />
         </TouchableOpacity>
 
-        {/* Center — dynamic island style pill */}
         <View style={styles.island}>
           <Text style={styles.islandText}>BlowSafe</Text>
         </View>
 
-        {/* Right — status indicator */}
         <View style={styles.topRight}>
-          <View style={[styles.statusDot, { backgroundColor: isConnected ? "#1DB954" : "#FF4C4C" }]} />
-          <Text style={styles.statusText}>{isConnected ? "Online" : "Offline"}</Text>
+          <View
+            style={[
+              styles.statusDot,
+              { backgroundColor: isConnected ? "#1DB954" : "#FF4C4C" },
+            ]}
+          />
+          <Text style={styles.statusText}>
+            {isConnected ? "Online" : "Offline"}
+          </Text>
+        </View>
+      </View>
+
+      {/* 📱 Main Scrollable Content */}
+      <ScrollView
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* 👮 Officer greeting */}
+        <View style={styles.header}>
+          <Text style={styles.welcome}>Welcome back</Text>
+          <Text style={styles.name}>Officer {officer?.officerId}</Text>
         </View>
 
-      </View>
+        {/* 🧾 Driver Info */}
+        <DriverCard
+          name="John Doe"
+          id="63-123456 A 12"
+          vehicle="ABC 1234"
+        />
 
-      {/* Main content */}
-      <View style={styles.content}>
-        <Text style={styles.welcome}>Welcome back</Text>
-        <Text style={styles.name}>Officer {officer?.officerId}</Text>
-      </View>
+        {/* 🪪 License Preview */}
+        <LicensePreview />
 
+        {/* 📊 Data Row */}
+        <DataRow alcohol="0.00" />
+
+        {/* ⚡ Actions */}
+        <ActionButtons />
+
+        {/* 📢 Status */}
+        <StatusBox message="Waiting for scan..." />
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -58,6 +93,8 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#121212",
   },
+
+  /* 🔝 TOP BAR (UNCHANGED) */
   topBar: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -119,20 +156,23 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
   },
+
+  /* 📱 CONTENT */
   content: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    paddingBottom: 100,
+    padding: 16,
+    paddingBottom: 40,
+  },
+
+  header: {
+    marginBottom: 16,
   },
   welcome: {
     color: "#888",
-    fontSize: 16,
-    marginBottom: 6,
+    fontSize: 14,
   },
   name: {
     color: "#fff",
-    fontSize: 28,
+    fontSize: 22,
     fontWeight: "bold",
   },
 });

@@ -39,14 +39,7 @@ export default function SettingsScreen() {
 
       <View style={styles.card}>
         <Text style={styles.label}>Status</Text>
-        <Text style={[
-          styles.value,
-          officer?.status === "approved" ? styles.green :
-          officer?.status === "rejected" ? styles.red :
-          styles.orange
-        ]}>
-          {officer?.status ?? "—"}
-        </Text>
+        <Text style={[styles.value, styles.green]}>{officer?.status ?? "—"}</Text>
       </View>
 
       <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
@@ -63,8 +56,6 @@ const styles = StyleSheet.create({
   label: { color: "#666", fontSize: 12, marginBottom: 4 },
   value: { color: "#fff", fontSize: 16, fontWeight: "600" },
   green: { color: "#1DB954" },
-  red: { color: "#FF4C4C" },
-  orange: { color: "orange" },
   logoutBtn: { marginTop: 30, borderColor: "#FF4C4C", borderWidth: 1.5, borderRadius: 25, paddingVertical: 14, alignItems: "center" },
   logoutText: { color: "#FF4C4C", fontWeight: "600", fontSize: 15 },
 });
