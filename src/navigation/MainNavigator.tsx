@@ -3,11 +3,11 @@ import { View, Text, StyleSheet, Animated } from "react-native";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { useOfficer } from "../context/OfficerContext";
 
-import HomeScreen from "../screens/HomeScreen";
-import PrintScreen from "../screens/PrintScreen";
-import ServerScreen from "../screens/ServerScreen";
-import SettingsScreen from "../screens/SettingsScreen";
-import DashboardScreen from "../screens/DashboardScreen";
+import HomeScreen        from "../screens/HomeScreen";
+import BreathalyserScreen from "../screens/BreathalyserScreen";
+import ServerScreen      from "../screens/ServerScreen";
+import SettingsScreen    from "../screens/SettingsScreen";
+import DashboardScreen   from "../screens/DashboardScreen";
 import RoleChangedScreen from "../screens/RoleChangedScreen";
 
 const Tab = createBottomTabNavigator();
@@ -21,7 +21,6 @@ export default function MainNavigator() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    // Fade in tabs smoothly — no flash
     Animated.timing(fadeAnim, {
       toValue: 1,
       duration: 300,
@@ -29,13 +28,12 @@ export default function MainNavigator() {
     }).start();
   }, [officer?.role]);
 
-  // Role changed — instantly replace everything with lock screen
   if (roleChanged) {
     return <RoleChangedScreen />;
   }
 
-  const role = officer?.role ?? "officer";
-  const isAdmin = role === "admin" || role === "superadmin";
+  const role        = officer?.role ?? "officer";
+  const isAdmin     = role === "admin" || role === "superadmin";
   const isSuperAdmin = role === "superadmin";
 
   return (
@@ -54,20 +52,29 @@ export default function MainNavigator() {
         <Tab.Screen
           name="Home"
           component={HomeScreen}
-          options={{ tabBarIcon: ({ color }) => <Icon label="⌂" color={color} /> }}
+          options={{
+            tabBarLabel: "Home",
+            tabBarIcon: ({ color }) => <Icon label="⌂" color={color} />,
+          }}
         />
 
         <Tab.Screen
-          name="Print"
-          component={PrintScreen}
-          options={{ tabBarIcon: ({ color }) => <Icon label="⎙" color={color} /> }}
+          name="Breathalyser"
+          component={BreathalyserScreen}
+          options={{
+            tabBarLabel: "Breathalyser",
+            tabBarIcon: ({ color }) => <Icon label="◉" color={color} />,
+          }}
         />
 
         {isAdmin && (
           <Tab.Screen
             name="Server"
             component={ServerScreen}
-            options={{ tabBarIcon: ({ color }) => <Icon label="⬡" color={color} /> }}
+            options={{
+              tabBarLabel: "Server",
+              tabBarIcon: ({ color }) => <Icon label="⬡" color={color} />,
+            }}
           />
         )}
 
@@ -75,14 +82,20 @@ export default function MainNavigator() {
           <Tab.Screen
             name="Dashboard"
             component={DashboardScreen}
-            options={{ tabBarIcon: ({ color }) => <Icon label="◈" color={color} /> }}
+            options={{
+              tabBarLabel: "Dashboard",
+              tabBarIcon: ({ color }) => <Icon label="◈" color={color} />,
+            }}
           />
         )}
 
         <Tab.Screen
           name="Settings"
           component={SettingsScreen}
-          options={{ tabBarIcon: ({ color }) => <Icon label="⚙" color={color} /> }}
+          options={{
+            tabBarLabel: "Settings",
+            tabBarIcon: ({ color }) => <Icon label="⚙" color={color} />,
+          }}
         />
       </Tab.Navigator>
     </Animated.View>
