@@ -17,9 +17,8 @@ import {
 } from "../helpers/useGetReading";
 import { type DriverData }  from "../helpers/constants";
 import DriverCard           from "../features/home/DriverCard";
-import LicensePreview       from "../features/home/LicensePreview";
 
-// ── Pulse ring — own component with its own hooks ─────────────────────────────
+// ── Pulse ring ────────────────────────────────────────────────────────────────
 function PulseRing({ active, color }: { active: boolean; color: string }) {
   const anim = useRef(new Animated.Value(0)).current;
   const loop = useRef<Animated.CompositeAnimation | null>(null);
@@ -58,7 +57,6 @@ function PulseRing({ active, color }: { active: boolean; color: string }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 export default function HomeScreen() {
-  // ── ALL hooks called unconditionally at the very top ──────────────────────
   const { officer }          = useOfficer();
   const { isConnected }      = useNetworkStatus();
   const { date, time }       = useLiveClock();
@@ -74,11 +72,11 @@ export default function HomeScreen() {
     requestScan,
   } = useBreathalyser();
 
-  const [driverValid,   setDriverValid]   = useState(false);
-  const [licencePhoto,  setLicencePhoto]  = useState<string | null>(null);
-  const [triggering,    setTriggering]    = useState(false);
+  // keep all 3 useState calls identical to original — never change hook count
+  const [driverValid,  setDriverValid]  = useState(false);
+  const [licencePhoto, setLicencePhoto] = useState<string | null>(null);
+  const [triggering,   setTriggering]   = useState(false);
 
-  // ── Callbacks — defined after all hooks ───────────────────────────────────
   const handleDriverChange = useCallback(
     (_data: DriverData, isValid: boolean, photoUri: string | null) => {
       setDriverValid(isValid);
@@ -104,7 +102,6 @@ export default function HomeScreen() {
     setTriggering(false);
   }, [triggering, bacResult, bleStatus, clearResult, requestScan]);
 
-  // ── All derived values — plain calculations, no hooks ─────────────────────
   const overLimit:    boolean | null = bacResult?.overLimit ?? null;
   const readingState: ReadingState   = getReadingState(bleStatus, deviceConnected, overLimit);
   const btnLabel:     string         = triggering ? "Connecting…" : getReadingLabel(readingState);
@@ -129,12 +126,12 @@ export default function HomeScreen() {
     "#444";
 
   const ledColor =
-    isWarmup                            ? s.ledBlue   :
-    isReading                           ? s.ledBlue   :
-    isRecal                             ? s.ledOrange :
-    readingState === "done_fail"        ? s.ledRed    :
-    readingState === "done_pass"        ? s.ledGreen  :
-    readingState === "ready"            ? s.ledGreen  :
+    isWarmup                     ? s.ledBlue   :
+    isReading                    ? s.ledBlue   :
+    isRecal                      ? s.ledOrange :
+    readingState === "done_fail" ? s.ledRed    :
+    readingState === "done_pass" ? s.ledGreen  :
+    readingState === "ready"     ? s.ledGreen  :
     s.ledGrey;
 
   const resultEmptyText =
@@ -145,7 +142,6 @@ export default function HomeScreen() {
     deviceConnected            ? "No reading yet"        :
     "Connect breathalyser to read";
 
-  // ── Single return — zero early returns ────────────────────────────────────
   return (
     <SafeAreaView style={s.root} edges={["top"]}>
       <StatusBar barStyle="light-content" backgroundColor="#121212" />
@@ -188,7 +184,6 @@ export default function HomeScreen() {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-
         {/* ── Device bar ────────────────────────────────────────────────── */}
         <View style={[s.deviceBar, deviceConnected ? s.deviceBarOn : s.deviceBarOff]}>
           <View style={[s.deviceDot, deviceConnected ? s.dotGreen : s.dotGrey]} />
@@ -207,11 +202,8 @@ export default function HomeScreen() {
           )}
         </View>
 
-        {/* ══ TOP HALF ═══════════════════════════════════════════════════ */}
+        {/* ── Driver card ───────────────────────────────────────────────── */}
         <DriverCard onDataChange={handleDriverChange} />
-        <LicensePreview photoUri={licencePhoto} />
-
-        {/* ══ BOTTOM HALF ════════════════════════════════════════════════ */}
 
         {/* ── Reading result card ───────────────────────────────────────── */}
         <View style={[
@@ -258,8 +250,6 @@ export default function HomeScreen() {
 
         {/* ── Buttons ───────────────────────────────────────────────────── */}
         <View style={s.btnRow}>
-
-          {/* Get Reading */}
           <View style={s.readingWrap}>
             <PulseRing active={isPulsing} color={pulseColor} />
             <TouchableOpacity
@@ -278,7 +268,6 @@ export default function HomeScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Upload */}
           <TouchableOpacity
             style={[s.uploadBtn, !driverValid ? s.uploadBtnOff : null]}
             onPress={handleUpload}
@@ -289,7 +278,6 @@ export default function HomeScreen() {
               Upload
             </Text>
           </TouchableOpacity>
-
         </View>
 
         {!driverValid ? (
@@ -307,64 +295,64 @@ export default function HomeScreen() {
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 const s = StyleSheet.create({
-  root:  { flex: 1, backgroundColor: "#121212" },
-  topBar: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.05)" },
-  logoWrap:       { width: 36, height: 36, borderRadius: 18, overflow: "hidden", borderWidth: 1.5, borderColor: "#1DB954" },
-  logo:           { width: "100%", height: "100%", resizeMode: "cover" },
-  island:         { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#1a1a1a", paddingHorizontal: 16, paddingVertical: 8, borderRadius: 30, borderWidth: 1, borderColor: "rgba(255,255,255,0.07)", elevation: 6 },
-  islandName:     { color: "#1DB954", fontSize: 13, fontWeight: "800", letterSpacing: 1 },
-  islandDivider:  { width: 1, height: 14, backgroundColor: "rgba(255,255,255,0.1)" },
-  islandClock:    { alignItems: "flex-start" },
-  islandTime:     { color: "#fff", fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"], letterSpacing: 0.5 },
-  islandDate:     { color: "#555", fontSize: 9, fontWeight: "500" },
-  statusPill:     { flexDirection: "row", alignItems: "center", gap: 4, width: 64, justifyContent: "flex-end" },
-  statusDot:      { width: 7, height: 7, borderRadius: 3.5 },
-  statusText:     { fontSize: 10, fontWeight: "700" },
-  scroll:         { flex: 1 },
-  content:        { padding: 12, paddingBottom: 40 },
-  deviceBar:      { flexDirection: "row", alignItems: "center", gap: 8, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 12, borderWidth: 1 },
-  deviceBarOn:    { backgroundColor: "rgba(29,185,84,0.05)", borderColor: "rgba(29,185,84,0.2)" },
-  deviceBarOff:   { backgroundColor: "rgba(255,255,255,0.02)", borderColor: "rgba(255,255,255,0.06)" },
-  deviceDot:      { width: 7, height: 7, borderRadius: 3.5, flexShrink: 0 },
-  dotGreen:       { backgroundColor: "#1DB954" },
-  dotGrey:        { backgroundColor: "#444" },
-  deviceText:     { fontSize: 11, fontWeight: "600", flex: 1 },
-  deviceTextOn:   { color: "#1DB954" },
-  deviceTextOff:  { color: "#444" },
-  warmupChip:     { backgroundColor: "rgba(30,144,255,0.12)", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, borderWidth: 1, borderColor: "rgba(30,144,255,0.3)" },
-  warmupChipText: { color: "#1e90ff", fontSize: 9, fontWeight: "700" },
-  resultCard:     { backgroundColor: "#1a1a1a", borderRadius: 14, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: "rgba(255,255,255,0.05)", minHeight: 72, justifyContent: "center" },
-  resultCardFail: { borderColor: "rgba(255,76,76,0.35)",  backgroundColor: "rgba(255,76,76,0.04)" },
-  resultCardPass: { borderColor: "rgba(29,185,84,0.35)",  backgroundColor: "rgba(29,185,84,0.03)" },
-  resultContent:  { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  resultLeft:     { gap: 2 },
-  bacBig:         { fontSize: 38, fontWeight: "800", letterSpacing: 1 },
-  bacMg:          { color: "#555", fontSize: 12 },
-  textFail:       { color: "#FF4C4C" },
-  textPass:       { color: "#1DB954" },
-  clearBtn:       { padding: 8, borderRadius: 14, backgroundColor: "#111" },
-  clearBtnText:   { color: "#555", fontSize: 14 },
-  resultEmpty:    { flexDirection: "row", alignItems: "center", gap: 10 },
-  resultLed:      { width: 10, height: 10, borderRadius: 5, flexShrink: 0 },
-  ledGrey:        { backgroundColor: "#333" },
-  ledGreen:       { backgroundColor: "#1DB954" },
-  ledBlue:        { backgroundColor: "#1e90ff" },
-  ledOrange:      { backgroundColor: "#f5a623" },
-  ledRed:         { backgroundColor: "#FF4C4C" },
-  resultEmptyText:{ color: "#555", fontSize: 13 },
-  errorRow:       { marginTop: 8 },
-  errorText:      { color: "#FF4C4C", fontSize: 11 },
-  recalRow:       { marginTop: 8, backgroundColor: "rgba(245,166,35,0.08)", borderLeftWidth: 3, borderLeftColor: "#f5a623", borderRadius: 6, padding: 8 },
-  recalText:      { color: "#f5a623", fontSize: 11, fontWeight: "600" },
-  btnRow:         { flexDirection: "row", gap: 12, marginBottom: 8 },
-  readingWrap:    { flex: 1, position: "relative" },
-  readingBtn:     { paddingVertical: 16, borderRadius: 14, alignItems: "center", justifyContent: "center" },
-  readingBtnOff:  { backgroundColor: "#1a1a1a", borderWidth: 1, borderColor: "#2a2a2a" },
-  readingBtnText: { fontSize: 15, fontWeight: "700" },
-  uploadBtn:      { flex: 1, paddingVertical: 16, borderRadius: 14, alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: "#1DB954" },
-  uploadBtnOff:   { borderColor: "#2a2a2a" },
-  uploadBtnText:  { fontSize: 15, fontWeight: "700", color: "#1DB954" },
+  root:            { flex: 1, backgroundColor: "#121212" },
+  topBar:          { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.05)" },
+  logoWrap:        { width: 36, height: 36, borderRadius: 18, overflow: "hidden", borderWidth: 1.5, borderColor: "#1DB954" },
+  logo:            { width: "100%", height: "100%", resizeMode: "cover" },
+  island:          { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "#1a1a1a", paddingHorizontal: 16, paddingVertical: 8, borderRadius: 30, borderWidth: 1, borderColor: "rgba(255,255,255,0.07)", elevation: 6 },
+  islandName:      { color: "#1DB954", fontSize: 13, fontWeight: "800", letterSpacing: 1 },
+  islandDivider:   { width: 1, height: 14, backgroundColor: "rgba(255,255,255,0.1)" },
+  islandClock:     { alignItems: "flex-start" },
+  islandTime:      { color: "#fff", fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"], letterSpacing: 0.5 },
+  islandDate:      { color: "#555", fontSize: 9, fontWeight: "500" },
+  statusPill:      { flexDirection: "row", alignItems: "center", gap: 4, width: 64, justifyContent: "flex-end" },
+  statusDot:       { width: 7, height: 7, borderRadius: 3.5 },
+  statusText:      { fontSize: 10, fontWeight: "700" },
+  scroll:          { flex: 1 },
+  content:         { padding: 12, paddingBottom: 40 },
+  deviceBar:       { flexDirection: "row", alignItems: "center", gap: 8, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 12, borderWidth: 1 },
+  deviceBarOn:     { backgroundColor: "rgba(29,185,84,0.05)", borderColor: "rgba(29,185,84,0.2)" },
+  deviceBarOff:    { backgroundColor: "rgba(255,255,255,0.02)", borderColor: "rgba(255,255,255,0.06)" },
+  deviceDot:       { width: 7, height: 7, borderRadius: 3.5, flexShrink: 0 },
+  dotGreen:        { backgroundColor: "#1DB954" },
+  dotGrey:         { backgroundColor: "#444" },
+  deviceText:      { fontSize: 11, fontWeight: "600", flex: 1 },
+  deviceTextOn:    { color: "#1DB954" },
+  deviceTextOff:   { color: "#444" },
+  warmupChip:      { backgroundColor: "rgba(30,144,255,0.12)", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, borderWidth: 1, borderColor: "rgba(30,144,255,0.3)" },
+  warmupChipText:  { color: "#1e90ff", fontSize: 9, fontWeight: "700" },
+  resultCard:      { backgroundColor: "#1a1a1a", borderRadius: 14, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: "rgba(255,255,255,0.05)", minHeight: 72, justifyContent: "center" },
+  resultCardFail:  { borderColor: "rgba(255,76,76,0.35)", backgroundColor: "rgba(255,76,76,0.04)" },
+  resultCardPass:  { borderColor: "rgba(29,185,84,0.35)", backgroundColor: "rgba(29,185,84,0.03)" },
+  resultContent:   { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  resultLeft:      { gap: 2 },
+  bacBig:          { fontSize: 38, fontWeight: "800", letterSpacing: 1 },
+  bacMg:           { color: "#555", fontSize: 12 },
+  textFail:        { color: "#FF4C4C" },
+  textPass:        { color: "#1DB954" },
+  clearBtn:        { padding: 8, borderRadius: 14, backgroundColor: "#111" },
+  clearBtnText:    { color: "#555", fontSize: 14 },
+  resultEmpty:     { flexDirection: "row", alignItems: "center", gap: 10 },
+  resultLed:       { width: 10, height: 10, borderRadius: 5, flexShrink: 0 },
+  ledGrey:         { backgroundColor: "#333" },
+  ledGreen:        { backgroundColor: "#1DB954" },
+  ledBlue:         { backgroundColor: "#1e90ff" },
+  ledOrange:       { backgroundColor: "#f5a623" },
+  ledRed:          { backgroundColor: "#FF4C4C" },
+  resultEmptyText: { color: "#555", fontSize: 13 },
+  errorRow:        { marginTop: 8 },
+  errorText:       { color: "#FF4C4C", fontSize: 11 },
+  recalRow:        { marginTop: 8, backgroundColor: "rgba(245,166,35,0.08)", borderLeftWidth: 3, borderLeftColor: "#f5a623", borderRadius: 6, padding: 8 },
+  recalText:       { color: "#f5a623", fontSize: 11, fontWeight: "600" },
+  btnRow:          { flexDirection: "row", gap: 12, marginBottom: 8 },
+  readingWrap:     { flex: 1, position: "relative" },
+  readingBtn:      { paddingVertical: 16, borderRadius: 14, alignItems: "center", justifyContent: "center" },
+  readingBtnOff:   { backgroundColor: "#1a1a1a", borderWidth: 1, borderColor: "#2a2a2a" },
+  readingBtnText:  { fontSize: 15, fontWeight: "700" },
+  uploadBtn:       { flex: 1, paddingVertical: 16, borderRadius: 14, alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: "#1DB954" },
+  uploadBtnOff:    { borderColor: "#2a2a2a" },
+  uploadBtnText:   { fontSize: 15, fontWeight: "700", color: "#1DB954" },
   uploadBtnTextOff:{ color: "#333" },
-  uploadHint:     { color: "#444", fontSize: 10, textAlign: "center", marginTop: 4 },
-  legalNote:      { color: "#2a2a2a", fontSize: 9, textAlign: "center", marginTop: 12 },
+  uploadHint:      { color: "#444", fontSize: 10, textAlign: "center", marginTop: 4 },
+  legalNote:       { color: "#2a2a2a", fontSize: 9, textAlign: "center", marginTop: 12 },
 });

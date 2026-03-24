@@ -1,3 +1,5 @@
+// src/context/BreathalyserContext.tsx
+
 import React, {
   createContext, useContext, useEffect,
   useState, useCallback, useRef,
@@ -40,6 +42,10 @@ export function BreathalyserProvider({ children }: { children: React.ReactNode }
   const [recalMsg,      setRecalMsg]      = useState("");
   const [battery,       setBattery]       = useState(0);
   const [connectedName, setConnectedName] = useState("");
+
+  // FIX: isConnected is now proper state — re-renders correctly on connect/disconnect
+  const [isConnected,   setIsConnected]   = useState(false);
+
   const recalTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -48,8 +54,14 @@ export function BreathalyserProvider({ children }: { children: React.ReactNode }
         case "status":
           setStatus(event.status);
           if (event.status !== "error") setErrorMsg("");
-          if (event.status === "connected")    setConnectedName(breathalyser.getConnectedDeviceName());
-          if (event.status === "disconnected") setConnectedName("");
+          if (event.status === "connected") {
+            setIsConnected(true);
+            setConnectedName(breathalyser.getConnectedDeviceName());
+          }
+          if (event.status === "disconnected") {
+            setIsConnected(false);
+            setConnectedName("");
+          }
           break;
         case "result":
           setResult(event.result);
@@ -98,9 +110,9 @@ export function BreathalyserProvider({ children }: { children: React.ReactNode }
 
   return (
     <BreathalyserContext.Provider value={{
-      status, result, history, errorMsg, recalMsg, battery,
-      isConnected:   breathalyser.isConnected(),
-      connectedName, requestScan, clearResult,
+      status, result, history, errorMsg, recalMsg,
+      battery, isConnected, connectedName,
+      requestScan, clearResult,
     }}>
       {children}
     </BreathalyserContext.Provider>

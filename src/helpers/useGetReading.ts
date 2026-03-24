@@ -1,8 +1,5 @@
-/**
- * src/helpers/useGetReading.ts
- * Plain helper — no hooks inside, just logic functions.
- * Called from HomeScreen which owns all hooks.
- */
+// Plain helper — no hooks inside, just logic functions.
+// Called from HomeScreen which owns all hooks.
 
 import { breathalyser } from "../features/breathalyser";
 
@@ -16,7 +13,7 @@ export type ReadingState =
   | "done_fail";
 
 export function getReadingState(
-  bleStatus: string,
+  bleStatus: string,          // remains string
   deviceConnected: boolean,
   overLimit: boolean | null
 ): ReadingState {
@@ -58,10 +55,11 @@ export async function triggerReading(
   bleStatus: string,
   requestScan: () => Promise<void>
 ): Promise<void> {
-  // If just connected send ping to sync state first
+  // Removed ping() call — STATUS is already sent on connect
+  // Extra writes were causing R4 to disconnect
   if (bleStatus === "connected") {
-    try { await breathalyser.ping(); } catch { }
-    await new Promise(r => setTimeout(r, 800));
+    // Give the device a moment to stabilise before scanning
+    await new Promise(r => setTimeout(r, 500));
   }
   await requestScan();
 }
