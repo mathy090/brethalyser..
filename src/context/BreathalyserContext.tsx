@@ -1,5 +1,3 @@
-// src/context/BreathalyserContext.tsx
-
 import React, {
   createContext, useContext, useEffect,
   useState, useCallback, useRef,
@@ -42,8 +40,6 @@ export function BreathalyserProvider({ children }: { children: React.ReactNode }
   const [recalMsg,      setRecalMsg]      = useState("");
   const [battery,       setBattery]       = useState(0);
   const [connectedName, setConnectedName] = useState("");
-
-  // FIX: isConnected is now proper state — re-renders correctly on connect/disconnect
   const [isConnected,   setIsConnected]   = useState(false);
 
   const recalTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -61,31 +57,39 @@ export function BreathalyserProvider({ children }: { children: React.ReactNode }
           if (event.status === "disconnected") {
             setIsConnected(false);
             setConnectedName("");
+            setBattery(0);
           }
           break;
+
         case "result":
           setResult(event.result);
           setHistory(prev => [event.result, ...prev].slice(0, 20));
           setRecalMsg("");
           break;
+
         case "battery":
           setBattery(event.level);
           break;
+
         case "recal":
           setRecalMsg("Sensor elevated — recalibrating…");
           break;
+
         case "stable":
           setRecalMsg("Recalibration complete.");
           if (recalTimer.current) clearTimeout(recalTimer.current);
-          recalTimer.current = setTimeout(() => setRecalMsg(""), 3000);
+          recalTimer.current = setTimeout(() => setRecalMsg(""), 3_000);
           break;
+
         case "error":
           setErrorMsg(event.message);
           break;
+
         case "scan_result":
           break;
       }
     });
+
     return () => {
       unsub();
       if (recalTimer.current) clearTimeout(recalTimer.current);
@@ -94,13 +98,22 @@ export function BreathalyserProvider({ children }: { children: React.ReactNode }
 
   const requestScan = useCallback(async () => {
     if (!breathalyser.isConnected()) {
-      setErrorMsg("No device connected. Go to Breathalyser tab.");
+      setErrorMsg("No device connected — go to the Breathalyser tab.");
       return;
     }
-    if (status !== "ready") return;
+    // Allow scan from "connected" (just paired, STATUS not yet replied)
+    // or "ready" (normal operating state).
+    // All other statuses mean the device is busy — silently ignore.
+    if (status !== "ready" && status !== "connected") return;
+
     setResult(null);
     setErrorMsg("");
-    await breathalyser.requestScan();
+
+    try {
+      await breathalyser.requestScan();
+    } catch (err: any) {
+      setErrorMsg(err?.message ?? "Scan request failed — please try again.");
+    }
   }, [status]);
 
   const clearResult = useCallback(() => {
@@ -110,9 +123,16 @@ export function BreathalyserProvider({ children }: { children: React.ReactNode }
 
   return (
     <BreathalyserContext.Provider value={{
-      status, result, history, errorMsg, recalMsg,
-      battery, isConnected, connectedName,
-      requestScan, clearResult,
+      status,
+      result,
+      history,
+      errorMsg,
+      recalMsg,
+      battery,
+      isConnected,
+      connectedName,
+      requestScan,
+      clearResult,
     }}>
       {children}
     </BreathalyserContext.Provider>

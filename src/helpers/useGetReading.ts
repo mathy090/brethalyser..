@@ -1,7 +1,5 @@
-// Plain helper — no hooks inside, just logic functions.
-// Called from HomeScreen which owns all hooks.
-
 import { breathalyser } from "../features/breathalyser";
+import type { DeviceStatus } from "../features/breathalyser";
 
 export type ReadingState =
   | "idle"
@@ -13,53 +11,55 @@ export type ReadingState =
   | "done_fail";
 
 export function getReadingState(
-  bleStatus: string,          // remains string
+  bleStatus:       DeviceStatus,
   deviceConnected: boolean,
-  overLimit: boolean | null
+  overLimit:       boolean | null
 ): ReadingState {
   if (!deviceConnected) return "idle";
-  if (bleStatus === "warmup") return "warmup";
-  if (bleStatus === "scanning_bac") return "reading";
-  if (bleStatus === "recalibrating") return "recalibrating";
-  if (bleStatus === "connected") return "ready";
-  if (bleStatus === "ready") {
-    if (overLimit === true) return "done_fail";
-    if (overLimit === false) return "done_pass";
-    return "ready";
+
+  switch (bleStatus) {
+    case "warmup":        return "warmup";
+    case "scanning_bac":  return "reading";
+    case "recalibrating": return "recalibrating";
+    case "error":         return "idle";
+
+    case "connected":
+    case "ready":
+      if (overLimit === true)  return "done_fail";
+      if (overLimit === false) return "done_pass";
+      return "ready";
+
+    default:
+      return "idle";
   }
-  return "idle";
 }
 
 export function getReadingLabel(state: ReadingState): string {
-  switch (state) {
-    case "idle": return "No Device";
-    case "warmup": return "Warming Up…";
-    case "reading": return "Reading…";
-    case "recalibrating": return "Recalibrating…";
-    case "done_pass": return "Get Reading";
-    case "done_fail": return "Get Reading";
-    case "ready": return "Get Reading";
-    default: return "Get Reading";
-  }
+  const labels: Record<ReadingState, string> = {
+    idle:          "No Device",
+    warmup:        "Warming Up…",
+    reading:       "Reading…",
+    recalibrating: "Recalibrating…",
+    done_pass:     "Get Reading",
+    done_fail:     "Get Reading",
+    ready:         "Get Reading",
+  };
+  return labels[state] ?? "Get Reading";
 }
 
 export function canPressReading(state: ReadingState): boolean {
-  return (
-    state === "ready" ||
-    state === "done_pass" ||
-    state === "done_fail"
-  );
+  return state === "ready" || state === "done_pass" || state === "done_fail";
 }
 
 export async function triggerReading(
-  bleStatus: string,
+  bleStatus:   DeviceStatus,
   requestScan: () => Promise<void>
 ): Promise<void> {
-  // Removed ping() call — STATUS is already sent on connect
-  // Extra writes were causing R4 to disconnect
+  // Brief settle only needed if Arduino just entered "connected" and hasn't
+  // transitioned to "ready" yet — STATUS was sent on connect so this is a
+  // short window, not a polling loop.
   if (bleStatus === "connected") {
-    // Give the device a moment to stabilise before scanning
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise<void>(r => setTimeout(r, 500));
   }
   await requestScan();
 }
