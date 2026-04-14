@@ -1,184 +1,243 @@
+/**
+ * src/routes/auth.ts
+ *
+ * Authentication endpoints for BlowSafe.
+ *
+ * POST /api/auth/register  — Firebase-authed officer self-registration
+ * POST /api/auth/login     — Firebase-authed officer login → JWT pair
+ * POST /api/auth/refresh   — Refresh JWT using a refresh token
+ * POST /api/auth/verify    — Validate a JWT (used by the mobile session guard)
+ */
+
 import { Router, type Response } from "express";
 import jwt from "jsonwebtoken";
+
+import { env }                                          from "../config/env";
 import { verifyFirebaseToken, verifyJWT, type AuthRequest } from "../middleware/verifyToken";
-import { rateLimiter } from "../middleware/rateLimiter";
-import { Officer } from "../models/Officer";
-import admin from "../config/firebase";
+import { rateLimiter }                                  from "../middleware/rateLimiter";
+import { Officer }                                      from "../models/Officer";
+import { Errors }                                       from "../utils/errors";
+import admin                                            from "../config/firebase";
 
 const router = Router();
 
-// POST /api/auth/register
-router.post("/register", rateLimiter, verifyFirebaseToken, async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    const { officerId, email } = req.body;
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
-    if (!officerId || !email) {
-      res.status(400).json({ message: "Officer ID and email are required." });
-      return;
-    }
+function signAccessToken(payload: {
+  uid:      string;
+  officerId: string;
+  role:     string;
+  status:   string;
+}): string {
+  return jwt.sign(payload, env.JWT_SECRET, { expiresIn: env.JWT_EXPIRES_IN });
+}
 
-    // Check if this email already has an account
-    const emailExists = await Officer.findOne({ email });
-    if (emailExists) {
-      res.status(409).json({ message: "This email is already registered. Use a different email." });
-      return;
-    }
+function signRefreshToken(payload: {
+  uid:      string;
+  officerId: string;
+  role:     string;
+  status:   string;
+}): string {
+  return jwt.sign(
+    { ...payload, type: "refresh" },
+    env.JWT_SECRET,
+    { expiresIn: env.REFRESH_EXPIRES_IN }
+  );
+}
 
-    // Check if this officerId is already taken by another email
-    const idExists = await Officer.findOne({ officerId });
-    if (idExists) {
-      res.status(409).json({ message: "This Officer ID is already taken. Please enter your correct ID." });
-      return;
-    }
+// ─── POST /api/auth/register ─────────────────────────────────────────────────
 
-    // Check if this Firebase account already registered
-    const uidExists = await Officer.findOne({ firebaseUid: req.uid });
-    if (uidExists) {
-      res.status(409).json({ message: "This account is already registered." });
-      return;
-    }
+router.post(
+  "/register",
+  rateLimiter,
+  verifyFirebaseToken,
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const { officerId, email } = req.body as {
+        officerId?: string;
+        email?:    string;
+      };
 
-    await Officer.create({
-      officerId,
-      email,
-      firebaseUid: req.uid,
-      role: "officer",
-      status: "approved",
-    });
-
-    res.status(201).json({ message: "Officer registered successfully." });
-  } catch {
-    res.status(500).json({ message: "Registration failed. Try again." });
-  }
-});
-
-// POST /api/auth/login
-router.post("/login", rateLimiter, verifyFirebaseToken, async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    const { officerId } = req.body;
-
-    // Check email verified
-    const firebaseUser = await admin.auth().getUser(req.uid!);
-    if (!firebaseUser.emailVerified) {
-      res.status(403).json({ message: "Email not verified. Check your inbox." });
-      return;
-    }
-
-    // Find officer by firebaseUid
-    let officer = await Officer.findOne({ firebaseUid: req.uid });
-
-    if (officer) {
-      // Officer found — verify officerId matches
-      if (officer.officerId !== officerId) {
-        res.status(403).json({ message: "Officer ID does not match this account." });
+      // Validate required fields up-front before any DB work.
+      const missing: string[] = [];
+      if (!officerId?.trim()) missing.push("officerId");
+      if (!email?.trim())     missing.push("email");
+      if (missing.length > 0) {
+        Errors.missingFields(res, missing);
         return;
       }
-    } else {
-      // Not found — create with default role
-      officer = await Officer.create({
-        officerId,
-        email: firebaseUser.email,
+
+      // All three uniqueness checks in parallel to minimise round trips.
+      const [emailDoc, idDoc, uidDoc] = await Promise.all([
+        Officer.findOne({ email:       email!.toLowerCase().trim() }),
+        Officer.findOne({ officerId:   officerId!.trim() }),
+        Officer.findOne({ firebaseUid: req.uid }),
+      ]);
+
+      if (emailDoc) { Errors.emailTaken(res);          return; }
+      if (idDoc)    { Errors.officerIdTaken(res);      return; }
+      if (uidDoc)   { Errors.accountAlreadyExists(res); return; }
+
+      await Officer.create({
+        officerId:   officerId!.trim(),
+        email:       email!.toLowerCase().trim(),
         firebaseUid: req.uid,
-        role: "officer",
-        status: "approved",
+        role:        "officer",
+        status:      "approved",
       });
+
+      res.status(201).json({ message: "Officer registered successfully." });
+    } catch (err) {
+      Errors.internal(res, "POST /register", err);
     }
-
-    // Issue JWT with role from MongoDB
-    const token = jwt.sign(
-      {
-        uid: req.uid,
-        officerId: officer.officerId,
-        role: officer.role,
-        status: officer.status,
-      },
-      process.env.JWT_SECRET!,
-      { expiresIn: process.env.JWT_EXPIRES_IN ?? "7d" }
-    );
-
-    const refreshToken = jwt.sign(
-      {
-        uid: req.uid,
-        officerId: officer.officerId,
-        role: officer.role,
-        status: officer.status,
-        type: "refresh",
-      },
-      process.env.JWT_SECRET!,
-      { expiresIn: "30d" }
-    );
-
-    res.status(200).json({
-      token,
-      refreshToken,
-      role: officer.role,
-      status: officer.status,
-      uid: req.uid,
-    });
-  } catch (err) {
-    console.error("Login error:", err);
-    res.status(500).json({ message: "Login failed. Try again." });
   }
-});
+);
 
-// POST /api/auth/refresh
-router.post("/refresh", async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    const { refreshToken } = req.body;
-    if (!refreshToken) {
-      res.status(401).json({ message: "No refresh token." });
-      return;
-    }
+// ─── POST /api/auth/login ────────────────────────────────────────────────────
 
-    const decoded = jwt.verify(refreshToken, process.env.JWT_SECRET!) as {
-      uid: string;
-      officerId: string;
-      role: string;
-      status: string;
-      type: string;
-    };
+router.post(
+  "/login",
+  rateLimiter,
+  verifyFirebaseToken,
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const { officerId } = req.body as { officerId?: string };
 
-    if (decoded.type !== "refresh") {
-      res.status(401).json({ message: "Invalid token type." });
-      return;
-    }
+      if (!officerId?.trim()) {
+        Errors.missingFields(res, ["officerId"]);
+        return;
+      }
 
-    // Always fetch latest role from MongoDB
-    const officer = await Officer.findOne({ firebaseUid: decoded.uid });
-    if (!officer) {
-      res.status(403).json({ message: "Officer not found." });
-      return;
-    }
+      // Confirm the Firebase user has verified their email.
+      let firebaseUser: admin.auth.UserRecord;
+      try {
+        firebaseUser = await admin.auth().getUser(req.uid!);
+      } catch (err) {
+        Errors.internal(res, "POST /login — getUser", err);
+        return;
+      }
 
-    const newToken = jwt.sign(
-      {
-        uid: decoded.uid,
+      if (!firebaseUser.emailVerified) {
+        Errors.emailNotVerified(res);
+        return;
+      }
+
+      // Look up or auto-create the MongoDB record.
+      let officer = await Officer.findOne({ firebaseUid: req.uid });
+
+      if (officer) {
+        // Existing account — make sure the submitted Officer ID matches.
+        if (officer.officerId !== officerId.trim()) {
+          Errors.officerIdMismatch(res);
+          return;
+        }
+      } else {
+        // First login after registration — create MongoDB record now.
+        officer = await Officer.create({
+          officerId:   officerId.trim(),
+          email:       firebaseUser.email?.toLowerCase().trim(),
+          firebaseUid: req.uid,
+          role:        "officer",
+          status:      "approved",
+        });
+      }
+
+      const tokenPayload = {
+        uid:       req.uid!,
         officerId: officer.officerId,
-        role: officer.role,
-        status: officer.status,
-      },
-      process.env.JWT_SECRET!,
-      { expiresIn: process.env.JWT_EXPIRES_IN ?? "7d" }
-    );
+        role:      officer.role,
+        status:    officer.status,
+      };
 
-    res.status(200).json({
-      token: newToken,
-      role: officer.role,
-      status: officer.status,
-    });
-  } catch {
-    res.status(401).json({ message: "Invalid or expired refresh token." });
+      const token        = signAccessToken(tokenPayload);
+      const refreshToken = signRefreshToken(tokenPayload);
+
+      res.status(200).json({
+        token,
+        refreshToken,
+        role:     officer.role,
+        status:   officer.status,
+        uid:      req.uid,
+        officerId: officer.officerId,
+      });
+    } catch (err) {
+      Errors.internal(res, "POST /login", err);
+    }
   }
-});
+);
 
-// POST /api/auth/verify
-router.post("/verify", verifyJWT, (req: AuthRequest, res: Response): void => {
-  res.status(200).json({
-    valid: true,
-    uid: req.uid,
-    officerId: req.officerId,
-    role: req.role,
-  });
-});
+// ─── POST /api/auth/refresh ──────────────────────────────────────────────────
+
+router.post(
+  "/refresh",
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const { refreshToken } = req.body as { refreshToken?: string };
+
+      if (!refreshToken?.trim()) {
+        Errors.noToken(res);
+        return;
+      }
+
+      let decoded: {
+        uid:      string;
+        officerId: string;
+        role:     string;
+        status:   string;
+        type:     string;
+      };
+
+      try {
+        decoded = jwt.verify(refreshToken, env.JWT_SECRET) as typeof decoded;
+      } catch {
+        Errors.invalidRefreshToken(res);
+        return;
+      }
+
+      if (decoded.type !== "refresh") {
+        Errors.invalidRefreshToken(res);
+        return;
+      }
+
+      // Always re-fetch from DB so the new token carries the latest role/status.
+      const officer = await Officer.findOne({ firebaseUid: decoded.uid });
+      if (!officer) {
+        Errors.officerNotFound(res);
+        return;
+      }
+
+      const newToken = signAccessToken({
+        uid:       decoded.uid,
+        officerId: officer.officerId,
+        role:      officer.role,
+        status:    officer.status,
+      });
+
+      res.status(200).json({
+        token:    newToken,
+        role:     officer.role,
+        status:   officer.status,
+        officerId: officer.officerId,
+      });
+    } catch (err) {
+      Errors.internal(res, "POST /refresh", err);
+    }
+  }
+);
+
+// ─── POST /api/auth/verify ───────────────────────────────────────────────────
+
+router.post(
+  "/verify",
+  verifyJWT,
+  (req: AuthRequest, res: Response): void => {
+    res.status(200).json({
+      valid:     true,
+      uid:       req.uid,
+      officerId: req.officerId,
+      role:      req.role,
+    });
+  }
+);
 
 export default router;
