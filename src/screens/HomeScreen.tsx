@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
   View, Text, StyleSheet, StatusBar,
-  Image, TouchableOpacity, ScrollView, Animated,
+  Image, TouchableOpacity, ScrollView, Animated, ActivityIndicator,
 } from "react-native";
 import { SafeAreaView }     from "react-native-safe-area-context";
 import { useOfficer }       from "../context/OfficerContext";
@@ -61,21 +61,20 @@ export default function HomeScreen() {
   const { isConnected }      = useNetworkStatus();
   const { date, time }       = useLiveClock();
   const {
-    status:      bleStatus,
-    result:      bacResult,
-    errorMsg:    bleError,
+    status:        bleStatus,
+    result:        bacResult,
+    errorMsg:      bleError,
     recalMsg,
     battery,
-    isConnected: deviceConnected,
+    isConnected:   deviceConnected,
+    isAwaitingBac,
     connectedName,
     clearResult,
     requestScan,
   } = useBreathalyser();
 
-  // keep all 3 useState calls identical to original — never change hook count
   const [driverValid,  setDriverValid]  = useState(false);
   const [licencePhoto, setLicencePhoto] = useState<string | null>(null);
-  const [triggering,   setTriggering]   = useState(false);
 
   const handleDriverChange = useCallback(
     (_data: DriverData, isValid: boolean, photoUri: string | null) => {
@@ -90,57 +89,61 @@ export default function HomeScreen() {
     // upload logic
   }, []);
 
-  const handleGetReading = useCallback(async () => {
-    if (triggering) return;
-    if (bacResult) clearResult();
-    setTriggering(true);
-    try {
-      await triggerReading(bleStatus, requestScan);
-    } catch (err: any) {
-      console.log("[HomeScreen] GetReading error:", err.message);
-    }
-    setTriggering(false);
-  }, [triggering, bacResult, bleStatus, clearResult, requestScan]);
-
+  // ── Reading state — all derived from single sources of truth ─────────────
   const overLimit:    boolean | null = bacResult?.overLimit ?? null;
-  const readingState: ReadingState   = getReadingState(bleStatus, deviceConnected, overLimit);
-  const btnLabel:     string         = triggering ? "Connecting…" : getReadingLabel(readingState);
-  const canPress:     boolean        = canPressReading(readingState) && !triggering;
+  const readingState: ReadingState   = getReadingState(
+    bleStatus, deviceConnected, overLimit, isAwaitingBac
+  );
+  const btnLabel: string  = getReadingLabel(readingState, isAwaitingBac);
+  const canPress: boolean = canPressReading(readingState, isAwaitingBac);
 
-  const isReading  = readingState === "reading";
+  const isReading  = readingState === "awaiting_bac";
   const isRecal    = readingState === "recalibrating";
   const isWarmup   = readingState === "warmup";
   const isPulsing  = isReading || isRecal;
   const pulseColor = isRecal ? "#f5a623" : "#1e90ff";
 
   const readingBtnBg =
-    isReading || triggering ? "#1e90ff" :
-    isRecal                 ? "#f5a623" :
-    canPress                ? "#1DB954" :
+    isReading ? "#1e90ff" :
+    isRecal   ? "#f5a623" :
+    canPress  ? "#1DB954" :
     "#1a1a1a";
 
   const readingBtnTextColor =
-    isReading || triggering ? "#fff" :
-    isRecal                 ? "#000" :
-    canPress                ? "#000" :
+    isReading ? "#fff" :
+    isRecal   ? "#000" :
+    canPress  ? "#000" :
     "#444";
 
   const ledColor =
-    isWarmup                     ? s.ledBlue   :
-    isReading                    ? s.ledBlue   :
-    isRecal                      ? s.ledOrange :
-    readingState === "done_fail" ? s.ledRed    :
-    readingState === "done_pass" ? s.ledGreen  :
-    readingState === "ready"     ? s.ledGreen  :
+    isWarmup                       ? s.ledBlue   :
+    isReading                      ? s.ledBlue   :
+    isRecal                        ? s.ledOrange :
+    readingState === "done_fail"   ? s.ledRed    :
+    readingState === "done_pass"   ? s.ledGreen  :
+    readingState === "ready"       ? s.ledGreen  :
+    readingState === "error"       ? s.ledRed    :
     s.ledGrey;
 
   const resultEmptyText =
-    isWarmup                   ? "Device warming up…"    :
-    isReading                  ? "Reading sensor…"       :
-    isRecal                    ? "Recalibrating sensor…" :
-    readingState === "ready"   ? "No reading yet"        :
-    deviceConnected            ? "No reading yet"        :
+    isAwaitingBac                    ? "Reading sensor…"       :
+    isWarmup                         ? "Device warming up…"    :
+    isRecal                          ? "Recalibrating sensor…" :
+    readingState === "error"         ? "Device error"          :
+    readingState === "ready"         ? "No reading yet"        :
+    deviceConnected                  ? "No reading yet"        :
     "Connect breathalyser to read";
+
+  // ── Get reading — no local loading state, driven by isAwaitingBac ────────
+  const handleGetReading = useCallback(async () => {
+    if (isAwaitingBac) return;
+    if (bacResult) clearResult();
+    try {
+      await triggerReading(bleStatus, requestScan);
+    } catch (err: any) {
+      console.log("[HomeScreen] GetReading error:", err.message);
+    }
+  }, [isAwaitingBac, bacResult, bleStatus, clearResult, requestScan]);
 
   return (
     <SafeAreaView style={s.root} edges={["top"]}>
@@ -200,6 +203,12 @@ export default function HomeScreen() {
               <Text style={s.warmupChipText}>Warming up</Text>
             </View>
           )}
+          {isAwaitingBac && (
+            <View style={s.readingChip}>
+              <ActivityIndicator size="small" color="#1e90ff" style={{ width: 10, height: 10 }} />
+              <Text style={s.readingChipText}>Reading…</Text>
+            </View>
+          )}
         </View>
 
         {/* ── Driver card ───────────────────────────────────────────────── */}
@@ -210,8 +219,9 @@ export default function HomeScreen() {
           s.resultCard,
           bacResult?.overLimit === true  ? s.resultCardFail : null,
           bacResult?.overLimit === false ? s.resultCardPass : null,
+          isAwaitingBac                  ? s.resultCardReading : null,
         ]}>
-          {bacResult ? (
+          {bacResult && !isAwaitingBac ? (
             <View style={s.resultContent}>
               <View style={s.resultLeft}>
                 <Text style={[
@@ -226,6 +236,17 @@ export default function HomeScreen() {
                 <Text style={s.clearBtnText}>✕</Text>
               </TouchableOpacity>
             </View>
+          ) : isAwaitingBac ? (
+            // ── Loading state while awaiting BAC ─────────────────────────
+            <View style={s.resultAwaiting}>
+              <ActivityIndicator size="large" color="#1e90ff" />
+              <View style={s.resultAwaitingText}>
+                <Text style={s.resultAwaitingTitle}>Reading sensor</Text>
+                <Text style={s.resultAwaitingBody}>
+                  Have the driver blow steadily into the device
+                </Text>
+              </View>
+            </View>
           ) : (
             <View style={s.resultEmpty}>
               <View style={[s.resultLed, ledColor]} />
@@ -233,13 +254,13 @@ export default function HomeScreen() {
             </View>
           )}
 
-          {bleError ? (
+          {!isAwaitingBac && bleError ? (
             <View style={s.errorRow}>
               <Text style={s.errorText}>{bleError}</Text>
             </View>
           ) : null}
 
-          {isRecal ? (
+          {!isAwaitingBac && isRecal ? (
             <View style={s.recalRow}>
               <Text style={s.recalText}>
                 ⚠  {recalMsg || "Sensor elevated — recalibrating. Wait before next reading."}
@@ -262,9 +283,22 @@ export default function HomeScreen() {
               disabled={!canPress && !isReading}
               activeOpacity={0.85}
             >
-              <Text style={[s.readingBtnText, { color: readingBtnTextColor }]}>
-                {btnLabel}
-              </Text>
+              {isAwaitingBac ? (
+                <View style={s.readingBtnInner}>
+                  <ActivityIndicator
+                    size="small"
+                    color="#fff"
+                    style={{ width: 16, height: 16 }}
+                  />
+                  <Text style={[s.readingBtnText, { color: "#fff" }]}>
+                    {btnLabel}
+                  </Text>
+                </View>
+              ) : (
+                <Text style={[s.readingBtnText, { color: readingBtnTextColor }]}>
+                  {btnLabel}
+                </Text>
+              )}
             </TouchableOpacity>
           </View>
 
@@ -310,6 +344,8 @@ const s = StyleSheet.create({
   statusText:      { fontSize: 10, fontWeight: "700" },
   scroll:          { flex: 1 },
   content:         { padding: 12, paddingBottom: 40 },
+
+  // Device bar
   deviceBar:       { flexDirection: "row", alignItems: "center", gap: 8, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 12, borderWidth: 1 },
   deviceBarOn:     { backgroundColor: "rgba(29,185,84,0.05)", borderColor: "rgba(29,185,84,0.2)" },
   deviceBarOff:    { backgroundColor: "rgba(255,255,255,0.02)", borderColor: "rgba(255,255,255,0.06)" },
@@ -319,40 +355,59 @@ const s = StyleSheet.create({
   deviceText:      { fontSize: 11, fontWeight: "600", flex: 1 },
   deviceTextOn:    { color: "#1DB954" },
   deviceTextOff:   { color: "#444" },
+
+  // Chips
   warmupChip:      { backgroundColor: "rgba(30,144,255,0.12)", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, borderWidth: 1, borderColor: "rgba(30,144,255,0.3)" },
   warmupChipText:  { color: "#1e90ff", fontSize: 9, fontWeight: "700" },
-  resultCard:      { backgroundColor: "#1a1a1a", borderRadius: 14, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: "rgba(255,255,255,0.05)", minHeight: 72, justifyContent: "center" },
-  resultCardFail:  { borderColor: "rgba(255,76,76,0.35)", backgroundColor: "rgba(255,76,76,0.04)" },
-  resultCardPass:  { borderColor: "rgba(29,185,84,0.35)", backgroundColor: "rgba(29,185,84,0.03)" },
-  resultContent:   { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  resultLeft:      { gap: 2 },
-  bacBig:          { fontSize: 38, fontWeight: "800", letterSpacing: 1 },
-  bacMg:           { color: "#555", fontSize: 12 },
-  textFail:        { color: "#FF4C4C" },
-  textPass:        { color: "#1DB954" },
-  clearBtn:        { padding: 8, borderRadius: 14, backgroundColor: "#111" },
-  clearBtnText:    { color: "#555", fontSize: 14 },
-  resultEmpty:     { flexDirection: "row", alignItems: "center", gap: 10 },
-  resultLed:       { width: 10, height: 10, borderRadius: 5, flexShrink: 0 },
-  ledGrey:         { backgroundColor: "#333" },
-  ledGreen:        { backgroundColor: "#1DB954" },
-  ledBlue:         { backgroundColor: "#1e90ff" },
-  ledOrange:       { backgroundColor: "#f5a623" },
-  ledRed:          { backgroundColor: "#FF4C4C" },
-  resultEmptyText: { color: "#555", fontSize: 13 },
-  errorRow:        { marginTop: 8 },
-  errorText:       { color: "#FF4C4C", fontSize: 11 },
-  recalRow:        { marginTop: 8, backgroundColor: "rgba(245,166,35,0.08)", borderLeftWidth: 3, borderLeftColor: "#f5a623", borderRadius: 6, padding: 8 },
-  recalText:       { color: "#f5a623", fontSize: 11, fontWeight: "600" },
-  btnRow:          { flexDirection: "row", gap: 12, marginBottom: 8 },
-  readingWrap:     { flex: 1, position: "relative" },
-  readingBtn:      { paddingVertical: 16, borderRadius: 14, alignItems: "center", justifyContent: "center" },
-  readingBtnOff:   { backgroundColor: "#1a1a1a", borderWidth: 1, borderColor: "#2a2a2a" },
-  readingBtnText:  { fontSize: 15, fontWeight: "700" },
-  uploadBtn:       { flex: 1, paddingVertical: 16, borderRadius: 14, alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: "#1DB954" },
-  uploadBtnOff:    { borderColor: "#2a2a2a" },
-  uploadBtnText:   { fontSize: 15, fontWeight: "700", color: "#1DB954" },
-  uploadBtnTextOff:{ color: "#333" },
-  uploadHint:      { color: "#444", fontSize: 10, textAlign: "center", marginTop: 4 },
-  legalNote:       { color: "#2a2a2a", fontSize: 9, textAlign: "center", marginTop: 12 },
+  readingChip:     { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: "rgba(30,144,255,0.12)", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, borderWidth: 1, borderColor: "rgba(30,144,255,0.3)" },
+  readingChipText: { color: "#1e90ff", fontSize: 9, fontWeight: "700" },
+
+  // Result card
+  resultCard:        { backgroundColor: "#1a1a1a", borderRadius: 14, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: "rgba(255,255,255,0.05)", minHeight: 80, justifyContent: "center" },
+  resultCardFail:    { borderColor: "rgba(255,76,76,0.35)", backgroundColor: "rgba(255,76,76,0.04)" },
+  resultCardPass:    { borderColor: "rgba(29,185,84,0.35)", backgroundColor: "rgba(29,185,84,0.03)" },
+  resultCardReading: { borderColor: "rgba(30,144,255,0.35)", backgroundColor: "rgba(30,144,255,0.04)" },
+
+  resultContent:    { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  resultLeft:       { gap: 2 },
+  bacBig:           { fontSize: 38, fontWeight: "800", letterSpacing: 1 },
+  bacMg:            { color: "#555", fontSize: 12 },
+  textFail:         { color: "#FF4C4C" },
+  textPass:         { color: "#1DB954" },
+  clearBtn:         { padding: 8, borderRadius: 14, backgroundColor: "#111" },
+  clearBtnText:     { color: "#555", fontSize: 14 },
+
+  // Awaiting BAC loading state
+  resultAwaiting:      { flexDirection: "row", alignItems: "center", gap: 16, paddingVertical: 8 },
+  resultAwaitingText:  { flex: 1, gap: 3 },
+  resultAwaitingTitle: { color: "#1e90ff", fontSize: 14, fontWeight: "700" },
+  resultAwaitingBody:  { color: "#555", fontSize: 11 },
+
+  resultEmpty:      { flexDirection: "row", alignItems: "center", gap: 10 },
+  resultLed:        { width: 10, height: 10, borderRadius: 5, flexShrink: 0 },
+  ledGrey:          { backgroundColor: "#333" },
+  ledGreen:         { backgroundColor: "#1DB954" },
+  ledBlue:          { backgroundColor: "#1e90ff" },
+  ledOrange:        { backgroundColor: "#f5a623" },
+  ledRed:           { backgroundColor: "#FF4C4C" },
+  resultEmptyText:  { color: "#555", fontSize: 13 },
+
+  errorRow:         { marginTop: 8 },
+  errorText:        { color: "#FF4C4C", fontSize: 11 },
+  recalRow:         { marginTop: 8, backgroundColor: "rgba(245,166,35,0.08)", borderLeftWidth: 3, borderLeftColor: "#f5a623", borderRadius: 6, padding: 8 },
+  recalText:        { color: "#f5a623", fontSize: 11, fontWeight: "600" },
+
+  // Buttons
+  btnRow:           { flexDirection: "row", gap: 12, marginBottom: 8 },
+  readingWrap:      { flex: 1, position: "relative" },
+  readingBtn:       { paddingVertical: 16, borderRadius: 14, alignItems: "center", justifyContent: "center" },
+  readingBtnOff:    { backgroundColor: "#1a1a1a", borderWidth: 1, borderColor: "#2a2a2a" },
+  readingBtnInner:  { flexDirection: "row", alignItems: "center", gap: 8 },
+  readingBtnText:   { fontSize: 15, fontWeight: "700" },
+  uploadBtn:        { flex: 1, paddingVertical: 16, borderRadius: 14, alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: "#1DB954" },
+  uploadBtnOff:     { borderColor: "#2a2a2a" },
+  uploadBtnText:    { fontSize: 15, fontWeight: "700", color: "#1DB954" },
+  uploadBtnTextOff: { color: "#333" },
+  uploadHint:       { color: "#444", fontSize: 10, textAlign: "center", marginTop: 4 },
+  legalNote:        { color: "#2a2a2a", fontSize: 9, textAlign: "center", marginTop: 12 },
 });

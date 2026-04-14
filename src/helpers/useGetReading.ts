@@ -2,26 +2,33 @@ import { breathalyser } from "../features/breathalyser";
 import type { DeviceStatus } from "../features/breathalyser";
 
 export type ReadingState =
-  | "idle"
-  | "warmup"
-  | "ready"
-  | "reading"
-  | "recalibrating"
-  | "done_pass"
-  | "done_fail";
+  | "idle"          // no device
+  | "warmup"        // device on, heating sensor
+  | "ready"         // device ready, no reading yet
+  | "awaiting_bac"  // SCAN sent, waiting for BAC data
+  | "recalibrating" // sensor elevated
+  | "done_pass"     // last reading was PASS
+  | "done_fail"     // last reading was FAIL
+  | "error";        // device error state
 
 export function getReadingState(
-  bleStatus:       DeviceStatus,
+  bleStatus:     DeviceStatus,
   deviceConnected: boolean,
-  overLimit:       boolean | null
+  overLimit:       boolean | null,
+  isAwaitingBac:   boolean,
 ): ReadingState {
   if (!deviceConnected) return "idle";
 
+  // isAwaitingBac is the authoritative loading flag —
+  // check it before inspecting bleStatus so the UI
+  // doesn't flicker between states mid-scan
+  if (isAwaitingBac) return "awaiting_bac";
+
   switch (bleStatus) {
     case "warmup":        return "warmup";
-    case "scanning_bac":  return "reading";
+    case "scanning_bac":  return "awaiting_bac";
     case "recalibrating": return "recalibrating";
-    case "error":         return "idle";
+    case "error":         return "error";
 
     case "connected":
     case "ready":
@@ -34,32 +41,36 @@ export function getReadingState(
   }
 }
 
-export function getReadingLabel(state: ReadingState): string {
+export function getReadingLabel(
+  state:         ReadingState,
+  isAwaitingBac: boolean,
+): string {
+  if (isAwaitingBac) return "Reading…";
   const labels: Record<ReadingState, string> = {
     idle:          "No Device",
     warmup:        "Warming Up…",
-    reading:       "Reading…",
+    awaiting_bac:  "Reading…",
     recalibrating: "Recalibrating…",
     done_pass:     "Get Reading",
     done_fail:     "Get Reading",
     ready:         "Get Reading",
+    error:         "Device Error",
   };
   return labels[state] ?? "Get Reading";
 }
 
-export function canPressReading(state: ReadingState): boolean {
+export function canPressReading(state: ReadingState, isAwaitingBac: boolean): boolean {
+  if (isAwaitingBac) return false;
   return state === "ready" || state === "done_pass" || state === "done_fail";
 }
 
 export async function triggerReading(
-  bleStatus:   DeviceStatus,
-  requestScan: () => Promise<void>
+  bleStatus:    DeviceStatus,
+  requestScan:  () => Promise<void>,
 ): Promise<void> {
-  // Brief settle only needed if Arduino just entered "connected" and hasn't
-  // transitioned to "ready" yet — STATUS was sent on connect so this is a
-  // short window, not a polling loop.
+  // If device just connected but hasn't confirmed ready yet, brief settle
   if (bleStatus === "connected") {
-    await new Promise<void>(r => setTimeout(r, 500));
+    await new Promise<void>(r => setTimeout(r, 600));
   }
   await requestScan();
 }

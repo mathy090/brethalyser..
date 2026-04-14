@@ -12,6 +12,7 @@ interface BreathalyserContextType {
   recalMsg:      string;
   battery:       number;
   isConnected:   boolean;
+  isAwaitingBac: boolean;       // true from SCAN sent → BAC received (loading state)
   connectedName: string;
   requestScan:   () => Promise<void>;
   clearResult:   () => void;
@@ -25,6 +26,7 @@ const BreathalyserContext = createContext<BreathalyserContextType>({
   recalMsg:      "",
   battery:       0,
   isConnected:   false,
+  isAwaitingBac: false,
   connectedName: "",
   requestScan:   async () => {},
   clearResult:   () => {},
@@ -41,23 +43,57 @@ export function BreathalyserProvider({ children }: { children: React.ReactNode }
   const [battery,       setBattery]       = useState(0);
   const [connectedName, setConnectedName] = useState("");
   const [isConnected,   setIsConnected]   = useState(false);
+  // isAwaitingBac: set true when SCAN is sent, cleared when result or error arrives
+  const [isAwaitingBac, setIsAwaitingBac] = useState(false);
 
-  const recalTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recalTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const awaitingRef = useRef(false); // shadow ref so event handler closure is always fresh
 
   useEffect(() => {
     const unsub = breathalyser.on((event) => {
       switch (event.type) {
+
         case "status":
           setStatus(event.status);
+
           if (event.status !== "error") setErrorMsg("");
-          if (event.status === "connected") {
+
+          if (event.status === "connected" || event.status === "ready" ||
+              event.status === "warmup"    || event.status === "recalibrating") {
             setIsConnected(true);
             setConnectedName(breathalyser.getConnectedDeviceName());
           }
+
+          if (event.status === "scanning_bac") {
+            // Device confirmed it started scanning — we are now awaiting BAC
+            // (belt-and-suspenders alongside the flag set in requestScan)
+            setIsConnected(true);
+          }
+
           if (event.status === "disconnected") {
             setIsConnected(false);
             setConnectedName("");
             setBattery(0);
+            // If we were waiting for a reading and device dropped, clear loading
+            if (awaitingRef.current) {
+              setIsAwaitingBac(false);
+              awaitingRef.current = false;
+            }
+          }
+
+          if (event.status === "ready") {
+            // If awaiting BAC but device returned ready without a result = scan failed
+            if (awaitingRef.current) {
+              setIsAwaitingBac(false);
+              awaitingRef.current = false;
+            }
+          }
+
+          if (event.status === "error") {
+            if (awaitingRef.current) {
+              setIsAwaitingBac(false);
+              awaitingRef.current = false;
+            }
           }
           break;
 
@@ -65,6 +101,9 @@ export function BreathalyserProvider({ children }: { children: React.ReactNode }
           setResult(event.result);
           setHistory(prev => [event.result, ...prev].slice(0, 20));
           setRecalMsg("");
+          // Result received — clear loading state
+          setIsAwaitingBac(false);
+          awaitingRef.current = false;
           break;
 
         case "battery":
@@ -72,7 +111,11 @@ export function BreathalyserProvider({ children }: { children: React.ReactNode }
           break;
 
         case "recal":
-          setRecalMsg("Sensor elevated — recalibrating…");
+          setRecalMsg("Sensor elevated — recalibrating. Wait before next reading.");
+          if (awaitingRef.current) {
+            setIsAwaitingBac(false);
+            awaitingRef.current = false;
+          }
           break;
 
         case "stable":
@@ -83,9 +126,15 @@ export function BreathalyserProvider({ children }: { children: React.ReactNode }
 
         case "error":
           setErrorMsg(event.message);
+          if (awaitingRef.current) {
+            setIsAwaitingBac(false);
+            awaitingRef.current = false;
+          }
           break;
 
-        case "scan_result":
+        case "debug":
+          // Uncomment for development:
+          // console.log("[BLE]", event.message);
           break;
       }
     });
@@ -101,24 +150,33 @@ export function BreathalyserProvider({ children }: { children: React.ReactNode }
       setErrorMsg("No device connected — go to the Breathalyser tab.");
       return;
     }
-    // Allow scan from "connected" (just paired, STATUS not yet replied)
-    // or "ready" (normal operating state).
-    // All other statuses mean the device is busy — silently ignore.
-    if (status !== "ready" && status !== "connected") return;
 
+    const currentStatus = breathalyser.getStatus();
+    if (currentStatus !== "ready" && currentStatus !== "connected") {
+      // Device busy — not an error, just ignore silently
+      return;
+    }
+
+    // Clear previous result and enter loading state before the write
     setResult(null);
     setErrorMsg("");
+    setIsAwaitingBac(true);
+    awaitingRef.current = true;
 
     try {
       await breathalyser.requestScan();
     } catch (err: any) {
       setErrorMsg(err?.message ?? "Scan request failed — please try again.");
+      setIsAwaitingBac(false);
+      awaitingRef.current = false;
     }
-  }, [status]);
+  }, []);
 
   const clearResult = useCallback(() => {
     setResult(null);
     setErrorMsg("");
+    setIsAwaitingBac(false);
+    awaitingRef.current = false;
   }, []);
 
   return (
@@ -130,6 +188,7 @@ export function BreathalyserProvider({ children }: { children: React.ReactNode }
       recalMsg,
       battery,
       isConnected,
+      isAwaitingBac,
       connectedName,
       requestScan,
       clearResult,
