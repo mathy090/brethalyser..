@@ -1,67 +1,115 @@
 import { BleManager, State, type Device, type Subscription } from "react-native-ble-plx";
 import { Buffer } from "buffer";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import SQLite from "react-native-sqlite-2";
 
+// ── BLE Configuration ─────────────────────────────────────────────────────────
 const SERVICE_UUID = "12345678-1234-1234-1234-123456789abc";
 const TX_UUID      = "12345678-1234-1234-1234-123456789abd";
 const RX_UUID      = "12345678-1234-1234-1234-123456789abe";
-const SCAN_TIMEOUT  = 10_000;
-const CONN_TIMEOUT  = 12_000;
-const MAX_RETRIES   = 3;
-const RETRY_DELAY   = 2_000;
+
+// ── Timing Constants ──────────────────────────────────────────────────────────
+const SCAN_TIMEOUT       = 10_000;
+const CONN_TIMEOUT       = 12_000;
+const HANDSHAKE_TIMEOUT  = 3_000;
+const MAX_RETRIES        = 3;
+const RETRY_DELAY        = 2_000;
 const HEARTBEAT_INTERVAL = 15_000;
 const HEARTBEAT_TIMEOUT  = 8_000;
+const MAX_STALE_MS       = 5_000;
+const DEFAULT_READING_TIMEOUT = 45_000; // Zimbabwe legal blow time
 
+// ── Cache & DB ────────────────────────────────────────────────────────────────
+const CACHE_KEY = "@blowsafe:last_device";
+const DB_NAME = "blowsafe.db";
+const DB_VERSION = 1;
+const DB_DISPLAY_NAME = "BlowSafe Database";
+const DB_SIZE = 5 * 1024 * 1024; // 5MB
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 export type DeviceStatus =
-  | "disconnected"
-  | "scanning"
-  | "connecting"
-  | "connected"
-  | "warmup"
-  | "ready"
-  | "scanning_bac"
-  | "recalibrating"
-  | "error";
+  | "disconnected" | "scanning" | "connecting" | "connected"
+  | "warmup" | "ready" | "scanning_bac" | "recalibrating" | "error";
 
 export interface BACResult {
-  bac:        number;
+  bac: number;
   bacPercent: string;
-  bacMg:      string;
-  status:     "PASS" | "FAIL";
+  bacMg: string;
+  status: "PASS" | "FAIL";
   legalLimit: number;
-  overLimit:  boolean;
-  timestamp:  number;
+  overLimit: boolean;
+  timestamp: number;
+  sequence?: number;
 }
 
 export interface ScannedDevice {
-  id:   string;
+  id: string;
   name: string;
   rssi: number;
 }
 
 export type BreathalyserEvent =
-  | { type: "status";      status: DeviceStatus }
-  | { type: "result";      result: BACResult    }
-  | { type: "battery";     level: number        }
-  | { type: "recal"                             }
-  | { type: "stable"                            }
-  | { type: "error";       message: string      }
+  | { type: "status"; status: DeviceStatus }
+  | { type: "result"; result: BACResult }
+  | { type: "battery"; level: number }
+  | { type: "recal" }
+  | { type: "stable" }
+  | { type: "error"; message: string }
   | { type: "scan_result"; devices: ScannedDevice[] }
-  | { type: "ble_state";   state: State         }
-  | { type: "debug";       message: string      };
+  | { type: "ble_state"; state: State }
+  | { type: "debug"; message: string }
+  | { type: "accessibility"; message: string; priority?: "assertive" | "polite" } // NEW
+  | { type: "progress"; step: "command_sent" | "awaiting_sensor" | "parsing" | "saving" | "complete" }; // NEW
 
 type Listener = (event: BreathalyserEvent) => void;
 
 interface WriteJob {
-  cmd:          string;
+  cmd: string;
   withResponse: boolean;
-  resolve:      () => void;
-  reject:       (err: Error) => void;
+  resolve: () => void;
+  reject: (err: Error) => void;
 }
 
-class WriteQueue {
-  private queue:   WriteJob[] = [];
-  private running              = false;
+// ── NEW: Queued Command for Offline Mode ──────────────────────────────────────
+export interface QueuedCommand {
+  id: string;
+  type: "SCAN" | "STATUS" | "PING";
+  payload: string | null;
+  createdAt: number;
+  retryCount: number;
+  maxRetries: number;
+  nextRetryAt: number;
+  timeoutMs: number;
+}
 
+// ── NEW: Get Reading Options/Result ───────────────────────────────────────────
+export interface GetReadingOptions {
+  timeoutMs?: number;
+  requireReady?: boolean;
+  validateSequence?: boolean;
+  onProgress?: (step: "command_sent" | "awaiting_sensor" | "parsing" | "saving" | "complete") => void;
+  onAccessibilityAnnouncement?: (message: string, priority?: "assertive" | "polite") => void;
+  enableQueue?: boolean;
+  maxQueueRetries?: number;
+  queueRetryDelayMs?: number;
+  testMode?: boolean;
+  mockResult?: BACResult | null;
+}
+
+export type GetReadingResult =
+  | { success: true; result: BACResult; savedToDB: boolean }
+  | {
+      success: false;
+      error: "device_not_ready" | "already_reading" | "timeout" | "parse_error" | "ble_drop" | "user_cancelled";
+      message?: string;
+      queued?: boolean;
+      requiresConfirmation?: boolean;
+    };
+
+// ── WriteQueue (unchanged) ────────────────────────────────────────────────────
+class WriteQueue {
+  private queue: WriteJob[] = [];
+  private running = false;
   _exec: (job: WriteJob) => Promise<void> = async () => {};
 
   enqueue(cmd: string, withResponse: boolean): Promise<void> {
@@ -73,8 +121,8 @@ class WriteQueue {
 
   private async flush(): Promise<void> {
     if (this.running || this.queue.length === 0) return;
-    this.running  = true;
-    const job     = this.queue.shift()!;
+    this.running = true;
+    const job = this.queue.shift()!;
     try {
       await this._exec(job);
       job.resolve();
@@ -88,44 +136,213 @@ class WriteQueue {
 
   drain(): void {
     for (const j of this.queue) j.reject(new Error("Queue drained"));
-    this.queue   = [];
+    this.queue = [];
     this.running = false;
   }
 
   get size(): number { return this.queue.length; }
 }
 
-export class BreathalyserManager {
-  private ble            = new BleManager();
-  private device:          Device | null       = null;
-  private listeners:       Listener[]          = [];
-  private rxBuffer         = "";
-  private monitorSub:      Subscription | null = null;
-  private bleStateSub:     Subscription | null = null;
-  private foundDevices     = new Map<string, ScannedDevice>();
-  private bleState:        State               = State.Unknown;
+// ── NEW: SQLite Helpers ───────────────────────────────────────────────────────
+let dbInstance: SQLite.SQLiteDatabase | null = null;
 
-  // Lifecycle guards — these are the single source of truth for connection state
-  private _isConnecting    = false;
+async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
+  if (dbInstance) return dbInstance;
+  
+  dbInstance = await SQLite.openDatabase(
+    DB_NAME, DB_VERSION, DB_DISPLAY_NAME, DB_SIZE
+  );
+  
+  // Initialize schema
+  await dbInstance.executeSql(`
+    CREATE TABLE IF NOT EXISTS bac_readings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      bac_value REAL NOT NULL,
+      bac_percent TEXT NOT NULL,
+      bac_mg TEXT NOT NULL,
+      status TEXT CHECK(status IN ('PASS', 'FAIL')) NOT NULL,
+      legal_limit REAL NOT NULL,
+      over_limit INTEGER NOT NULL,
+      sequence INTEGER,
+      timestamp INTEGER NOT NULL,
+      device_id TEXT,
+      synced INTEGER DEFAULT 0,
+      created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
+    )
+  `);
+  
+  await dbInstance.executeSql(
+    `CREATE INDEX IF NOT EXISTS idx_readings_timestamp ON bac_readings(timestamp DESC)`
+  );
+  
+  return dbInstance;
+}
+
+export async function saveResultToDB(
+  result: BACResult,
+  deviceId?: string
+): Promise<boolean> {
+  try {
+    const db = await getDatabase();
+    await db.executeSql(
+      `INSERT INTO bac_readings 
+       (bac_value, bac_percent, bac_mg, status, legal_limit, over_limit, sequence, timestamp, device_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        result.bac,
+        result.bacPercent,
+        result.bacMg,
+        result.status,
+        result.legalLimit,
+        result.overLimit ? 1 : 0,
+        result.sequence ?? null,
+        result.timestamp,
+        deviceId ?? null
+      ]
+    );
+    return true;
+  } catch (err) {
+    console.error("[SQLite] Save failed:", err);
+    return false;
+  }
+}
+
+export async function getReadingHistory(limit: number = 20): Promise<BACResult[]> {
+  try {
+    const db = await getDatabase();
+    const results = await db.executeSql(
+      `SELECT * FROM bac_readings ORDER BY timestamp DESC LIMIT ?`,
+      [limit]
+    );
+    
+    return results[0].rows?.map?.((row: any) => ({
+      bac: row.bac_value,
+      bacPercent: row.bac_percent,
+      bacMg: row.bac_mg,
+      status: row.status as "PASS" | "FAIL",
+      legalLimit: row.legal_limit,
+      overLimit: row.over_limit === 1,
+      timestamp: row.timestamp,
+      sequence: row.sequence ?? undefined,
+    })) ?? [];
+  } catch (err) {
+    console.error("[SQLite] History fetch failed:", err);
+    return [];
+  }
+}
+
+// ── NEW: Command Queue Processor (Offline Mode) ───────────────────────────────
+class CommandQueue {
+  private queue: QueuedCommand[] = [];
+  private processorInterval: ReturnType<typeof setInterval> | null = null;
+  private breathalyser: BreathalyserManager;
+  
+  constructor(breathalyser: BreathalyserManager) {
+    this.breathalyser = breathalyser;
+  }
+  
+  enqueue(cmd: Omit<QueuedCommand, "id" | "createdAt" | "nextRetryAt" | "retryCount">): QueuedCommand {
+    const command: QueuedCommand = {
+      ...cmd,
+      id: `${cmd.type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      createdAt: Date.now(),
+      nextRetryAt: Date.now(),
+      retryCount: 0,
+    };
+    this.queue.push(command);
+    this.startProcessor();
+    return command;
+  }
+  
+  private startProcessor(): void {
+    if (this.processorInterval) return;
+    
+    this.processorInterval = setInterval(async () => {
+      if (!this.breathalyser.isConnected()) return;
+      
+      const now = Date.now();
+      const eligible = this.queue.filter(c => 
+        c.nextRetryAt <= now && c.retryCount < c.maxRetries
+      );
+      
+      for (const cmd of eligible) {
+        try {
+          if (cmd.type === "SCAN") {
+            await this.breathalyser.requestScan();
+          }
+          // Add other command types as needed
+          
+          // Success: remove from queue
+          this.queue = this.queue.filter(c => c.id !== cmd.id);
+        } catch {
+          // Retry with exponential backoff
+          cmd.retryCount++;
+          const baseDelay = cmd.queueRetryDelayMs ?? 2000;
+          cmd.nextRetryAt = now + Math.min(baseDelay * Math.pow(2, cmd.retryCount - 1), 30000);
+        }
+      }
+      
+      // Stop processor if queue is empty
+      if (this.queue.length === 0 && this.processorInterval) {
+        clearInterval(this.processorInterval);
+        this.processorInterval = null;
+      }
+    }, 2000);
+  }
+  
+  getPendingCount(): number {
+    return this.queue.length;
+  }
+  
+  clear(): void {
+    this.queue = [];
+    if (this.processorInterval) {
+      clearInterval(this.processorInterval);
+      this.processorInterval = null;
+    }
+  }
+}
+
+// ── Main Manager Class ────────────────────────────────────────────────────────
+export class BreathalyserManager {
+  private ble = new BleManager();
+  private device: Device | null = null;
+  private listeners: Listener[] = [];
+  private rxBuffer = "";
+  private monitorSub: Subscription | null = null;
+  private bleStateSub: Subscription | null = null;
+  private foundDevices = new Map<string, ScannedDevice>();
+  private bleState: State = State.Unknown;
+
+  // Lifecycle guards
+  private _isConnecting = false;
   private _isDisconnecting = false;
   private _intentionalDisconnect = false;
 
   // Retry state
-  private retryCount  = 0;
+  private retryCount = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private lastConnectedDevice: ScannedDevice | null = null;
 
-  // Heartbeat — detects silent drops (device powered off mid-session)
-  private heartbeatTimer:  ReturnType<typeof setInterval> | null = null;
-  private pongTimer:       ReturnType<typeof setTimeout>  | null = null;
-  private lastPongAt       = 0;
+  // Heartbeat
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private pongTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastPongAt = 0;
 
-  // Current status — single source of truth, never inferred from multiple flags
+  // Spoof-test resilience
+  private lastSequence = -1;
+  private testMode = false;
+
+  // NEW: Command queue for offline mode
+  private commandQueue: CommandQueue;
+
+  // Status
   private _status: DeviceStatus = "disconnected";
-
   private wq = new WriteQueue();
 
   constructor() {
+    this.commandQueue = new CommandQueue(this);
+    
     this.wq._exec = async (job: WriteJob) => {
       if (!this.device) throw new Error("No device connected");
       const b64 = Buffer.from(`${job.cmd}\n`, "utf-8").toString("base64");
@@ -151,14 +368,13 @@ export class BreathalyserManager {
     }, true);
   }
 
-  // ── Event bus ────────────────────────────────────────────────────────────────
+  // ── Event Bus ───────────────────────────────────────────────────────────────
   on(cb: Listener): () => void {
     this.listeners.push(cb);
     return () => { this.listeners = this.listeners.filter(l => l !== cb); };
   }
 
   private emit(event: BreathalyserEvent): void {
-    // Keep internal status in sync from a single place
     if (event.type === "status") {
       this._status = event.status;
     }
@@ -167,15 +383,27 @@ export class BreathalyserManager {
     });
   }
 
-  // ── Public getters ───────────────────────────────────────────────────────────
-  getBLEState():            State        { return this.bleState; }
-  isConnected():            boolean      { return this.device !== null; }
-  getStatus():              DeviceStatus { return this._status; }
+  // ── Public Getters ──────────────────────────────────────────────────────────
+  getBLEState(): State { return this.bleState; }
+  isConnected(): boolean { return this.device !== null; }
+  getStatus(): DeviceStatus { return this._status; }
   getConnectedDeviceName(): string {
     return this.device?.name ?? this.lastConnectedDevice?.name ?? "BlowSafe";
   }
+  getPendingQueueCount(): number {
+    return this.commandQueue.getPendingCount();
+  }
 
-  // ── Scan ─────────────────────────────────────────────────────────────────────
+  // ── Test Mode Toggle ────────────────────────────────────────────────────────
+  setTestMode(enabled: boolean): void {
+    this.testMode = enabled;
+    this.emit({ 
+      type: "debug", 
+      message: enabled ? "⚠️ SPOOF-TEST MODE: Accepting malformed payloads" : "✅ Normal mode" 
+    });
+  }
+
+  // ── Scan (UUID filtering) ───────────────────────────────────────────────────
   async scan(): Promise<ScannedDevice[]> {
     if (this.bleState !== State.PoweredOn) {
       this.emit({ type: "error", message: "Bluetooth is off — please enable it first." });
@@ -191,7 +419,7 @@ export class BreathalyserManager {
         const devices = this._sortedDevices();
         if (devices.length === 0) {
           this.emit({
-            type:    "error",
+            type: "error",
             message: "No BlowSafe devices found. Ensure the device is powered on and nearby.",
           });
         }
@@ -200,7 +428,7 @@ export class BreathalyserManager {
       }, SCAN_TIMEOUT);
 
       this.ble.startDeviceScan(
-        null,
+        [SERVICE_UUID],
         { allowDuplicates: false },
         (err, d) => {
           if (err) {
@@ -222,69 +450,92 @@ export class BreathalyserManager {
   }
 
   stopScan(): void { this.ble.stopDeviceScan(); }
-
   private _sortedDevices(): ScannedDevice[] {
     return [...this.foundDevices.values()].sort((a, b) => b.rssi - a.rssi);
   }
 
-  // ── Connect ───────────────────────────────────────────────────────────────────
+  // ── Connect Cached ──────────────────────────────────────────────────────────
+  async connectCached(): Promise<boolean> {
+    try {
+      const cached = await AsyncStorage.getItem(CACHE_KEY);
+      if (!cached) return false;
+      const device = JSON.parse(cached) as ScannedDevice;
+      
+      const isConn = await this.ble.isDeviceConnected(device.id).catch(() => false);
+      if (isConn) {
+        await this.connect(device);
+        return true;
+      }
+      await this.connect(device);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ── Connect (MTU + Handshake) ───────────────────────────────────────────────
   async connect(device: ScannedDevice): Promise<void> {
-    if (this._isConnecting) {
-      throw new Error("Already connecting — please wait.");
-    }
-    if (this._isDisconnecting) {
-      throw new Error("Disconnecting in progress — please wait.");
-    }
-    if (this.bleState !== State.PoweredOn) {
-      throw new Error("Bluetooth is off — enable it first.");
-    }
-    if (this.device) {
-      throw new Error("Already connected — disconnect first.");
-    }
+    if (this._isConnecting) throw new Error("Already connecting — please wait.");
+    if (this._isDisconnecting) throw new Error("Disconnecting in progress — please wait.");
+    if (this.bleState !== State.PoweredOn) throw new Error("Bluetooth is off — enable it first.");
+    if (this.device) throw new Error("Already connected — disconnect first.");
 
     this._clearRetryTimer();
-    this._isConnecting       = true;
+    this._isConnecting = true;
     this._intentionalDisconnect = false;
 
     this.ble.stopDeviceScan();
     this._setStatus("connecting");
     this.emit({ type: "debug", message: `Connecting to ${device.name} (${device.id})` });
 
+    let handshakeResolved = false;
+    const handshakeTimeout = setTimeout(() => {
+      if (!handshakeResolved) {
+        this.emit({ type: "debug", message: "Handshake timeout" });
+        this._cleanupDevice("Device not responding to handshake.");
+      }
+    }, HANDSHAKE_TIMEOUT);
+
+    const completeHandshake = () => {
+      if (handshakeResolved) return;
+      handshakeResolved = true;
+      clearTimeout(handshakeTimeout);
+      this._setStatus("ready");
+      this.emit({ type: "debug", message: "Handshake complete — device ready" });
+    };
+
     try {
-      // Cancel any stale OS-level connection for this device
       const alreadyConn = await this.ble.isDeviceConnected(device.id).catch(() => false);
       if (alreadyConn) {
-        this.emit({ type: "debug", message: "Cancelling stale OS connection" });
         await this.ble.cancelDeviceConnection(device.id).catch(() => {});
         await _sleep(500);
       }
 
-      // Connect with timeout
       this.device = await _withTimeout(
         this.ble.connectToDevice(device.id, { autoConnect: false }),
         CONN_TIMEOUT,
         "Connection timed out — ensure BlowSafe is on and nearby."
       );
 
-      this.emit({ type: "debug", message: "Connected, discovering services…" });
       await this.device.discoverAllServicesAndCharacteristics();
 
-      // Subscribe BEFORE any write — Arduino R4 must see subscription first
+      try {
+        await this.device.requestMTU(185);
+        this.emit({ type: "debug", message: "MTU negotiated (185 bytes)" });
+      } catch {
+        this.emit({ type: "debug", message: "MTU request failed, using default 20B" });
+      }
+
       this._setupMonitor();
       this.emit({ type: "debug", message: "Monitor active" });
-
-      // R4 ArduinoBLE needs time to settle after GATT negotiation
       await _sleep(1_200);
-
-      // Request current device state — response arrives via monitor
       await this.wq.enqueue("STATUS", false);
-      this.emit({ type: "debug", message: "STATUS sent" });
+      this.emit({ type: "debug", message: "STATUS sent — awaiting handshake" });
 
-      // Register disconnect handler
       this.device.onDisconnected((_err, _d) => {
         const wasIntentional = this._intentionalDisconnect;
         this.emit({
-          type:    "debug",
+          type: "debug",
           message: `onDisconnected fired — intentional: ${wasIntentional}`,
         });
         this._stopHeartbeat();
@@ -297,18 +548,18 @@ export class BreathalyserManager {
         }
       });
 
+      await AsyncStorage.setItem(CACHE_KEY, JSON.stringify(device));
+      
       this.lastConnectedDevice = device;
-      this.retryCount          = 0;
-
-      // Start heartbeat AFTER confirmed connection
+      this.retryCount = 0;
+      this._setStatus("connected");
       this._startHeartbeat();
 
-      this._setStatus("connected");
-
     } catch (err: any) {
+      clearTimeout(handshakeTimeout);
       this._cleanupDevice(null);
       const msg = _friendlyError(err);
-      this.emit({ type: "error",  message: msg });
+      this.emit({ type: "error", message: msg });
       this._setStatus("disconnected");
       throw new Error(msg);
     } finally {
@@ -316,17 +567,13 @@ export class BreathalyserManager {
     }
   }
 
-  // ── Heartbeat ─────────────────────────────────────────────────────────────────
-  // Sends PING every HEARTBEAT_INTERVAL ms.
-  // If no PONG arrives within HEARTBEAT_TIMEOUT, the device is considered lost.
+  // ── Heartbeat ───────────────────────────────────────────────────────────────
   private _startHeartbeat(): void {
     this._stopHeartbeat();
     this.lastPongAt = Date.now();
 
     this.heartbeatTimer = setInterval(async () => {
       if (!this.device) { this._stopHeartbeat(); return; }
-
-      // If we already have a pending pong timer, previous ping was unanswered
       if (this.pongTimer) {
         this.emit({ type: "debug", message: "Heartbeat: no PONG — device lost" });
         this._stopHeartbeat();
@@ -336,19 +583,11 @@ export class BreathalyserManager {
         }
         return;
       }
-
       try {
         await this.wq.enqueue("PING", false);
         this.emit({ type: "debug", message: "Heartbeat PING sent" });
-
-        // Start pong timeout
-        this.pongTimer = setTimeout(() => {
-          this.pongTimer = null;
-          // pongTimer expired without being cleared = no PONG received
-          // Next heartbeat cycle will detect this
-        }, HEARTBEAT_TIMEOUT);
+        this.pongTimer = setTimeout(() => { this.pongTimer = null; }, HEARTBEAT_TIMEOUT);
       } catch {
-        // Write failed — device likely gone
         this._stopHeartbeat();
         this._cleanupDevice("Device not responding.");
       }
@@ -357,16 +596,16 @@ export class BreathalyserManager {
 
   private _stopHeartbeat(): void {
     if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
-    if (this.pongTimer)      { clearTimeout(this.pongTimer);       this.pongTimer      = null; }
+    if (this.pongTimer) { clearTimeout(this.pongTimer); this.pongTimer = null; }
   }
 
-  // ── Auto-retry ────────────────────────────────────────────────────────────────
+  // ── Auto-retry ──────────────────────────────────────────────────────────────
   private _scheduleRetry(device: ScannedDevice): void {
     this._clearRetryTimer();
     this.retryCount++;
     const delay = RETRY_DELAY * this.retryCount;
     this.emit({
-      type:    "debug",
+      type: "debug",
       message: `Scheduling retry ${this.retryCount}/${MAX_RETRIES} in ${delay}ms`,
     });
 
@@ -377,7 +616,7 @@ export class BreathalyserManager {
       } catch {
         if (this.retryCount >= MAX_RETRIES) {
           this.emit({
-            type:    "error",
+            type: "error",
             message: "Could not reconnect after multiple attempts. Tap Scan to reconnect manually.",
           });
           this.retryCount = 0;
@@ -390,7 +629,7 @@ export class BreathalyserManager {
     if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
   }
 
-  // ── Monitor ───────────────────────────────────────────────────────────────────
+  // ── Monitor ─────────────────────────────────────────────────────────────────
   private _setupMonitor(): void {
     if (!this.device) return;
     this._teardownMonitor();
@@ -401,7 +640,6 @@ export class BreathalyserManager {
       (err, char) => {
         if (err) {
           const msg = err.message ?? "";
-          // These are expected during intentional disconnect — suppress
           if (/cancelled|disconnected|destroyed/i.test(msg)) return;
           this.emit({ type: "debug", message: `Monitor error: ${msg}` });
           return;
@@ -416,8 +654,8 @@ export class BreathalyserManager {
         }
 
         this.rxBuffer += text;
-        const lines    = this.rxBuffer.split("\n");
-        this.rxBuffer  = lines.pop() ?? "";
+        const lines = this.rxBuffer.split("\n");
+        this.rxBuffer = lines.pop() ?? "";
         lines.forEach(l => {
           const t = l.trim();
           if (t) {
@@ -429,48 +667,63 @@ export class BreathalyserManager {
     );
   }
 
-  // ── Line parser ───────────────────────────────────────────────────────────────
+  // ── Line Parser (Spoof-Test Validation) ─────────────────────────────────────
   private _parseLine(line: string): void {
-    // STATE:<status>:<battery>
     if (line.startsWith("STATE:")) {
       const [, state = "", battRaw = ""] = line.split(":");
       const batt = _safeInt(battRaw);
       if (batt >= 0) this.emit({ type: "battery", level: batt });
 
       const statusMap: Record<string, DeviceStatus> = {
-        READY:    "ready",
-        WARMUP:   "warmup",
-        SCANNING: "scanning_bac",
-        FAIL:     "error",
-        RECAL:    "recalibrating",
+        READY: "ready", WARMUP: "warmup", SCANNING: "scanning_bac",
+        FAIL: "error", RECAL: "recalibrating",
       };
       const mapped = statusMap[state.trim().toUpperCase()];
       if (mapped) {
         this._setStatus(mapped);
         if (state.trim().toUpperCase() === "RECAL") this.emit({ type: "recal" });
+        if (state.trim().toUpperCase() === "READY" && this._status === "connected") {
+          this._setStatus("ready");
+        }
       }
       return;
     }
 
-    // PONG:<battery>
     if (line.startsWith("PONG:")) {
       const batt = _safeInt(line.slice(5));
       if (batt >= 0) this.emit({ type: "battery", level: batt });
-      // Clear pong timeout — heartbeat confirmed alive
       if (this.pongTimer) {
         clearTimeout(this.pongTimer);
-        this.pongTimer  = null;
+        this.pongTimer = null;
         this.lastPongAt = Date.now();
         this.emit({ type: "debug", message: "Heartbeat PONG received" });
+      }
+      if (this._status === "connected") {
+        this._setStatus("ready");
       }
       return;
     }
 
-    // BAC:<value>:<PASS|FAIL>
     if (line.startsWith("BAC:")) {
-      const parts  = line.split(":");
-      const bac    = _safeFloat(parts[1] ?? "");
+      const parts = line.split(":");
+      const bac = _safeFloat(parts[1] ?? "");
       const isFail = (parts[2] ?? "").trim().toUpperCase() === "FAIL";
+      
+      const seq = _safeInt(parts[3] ?? "-1");
+      const ts = _safeInt(parts[4] ?? "0");
+
+      if (!this.testMode) {
+        if (seq >= 0 && seq <= this.lastSequence) {
+          this.emit({ type: "debug", message: `⚠️ Rejected stale packet seq:${seq}` });
+          return;
+        }
+        if (ts > 0 && Date.now() - ts > MAX_STALE_MS) {
+          this.emit({ type: "debug", message: `⚠️ Rejected stale timestamp:${ts}` });
+          return;
+        }
+      }
+      
+      if (seq >= 0) this.lastSequence = seq;
 
       if (isNaN(bac)) {
         this.emit({ type: "error", message: "Malformed BAC reading — please retry." });
@@ -480,84 +733,227 @@ export class BreathalyserManager {
       const result: BACResult = {
         bac,
         bacPercent: `${bac.toFixed(3)}%`,
-        bacMg:      `${Math.round(bac * 1000)} mg/100ml`,
-        status:     isFail ? "FAIL" : "PASS",
+        bacMg: `${Math.round(bac * 1000)} mg/100ml`,
+        status: isFail ? "FAIL" : "PASS",
         legalLimit: 0.08,
-        overLimit:  isFail,
-        timestamp:  Date.now(),
+        overLimit: isFail,
+        timestamp: Date.now(),
+        sequence: seq >= 0 ? seq : undefined,
       };
+      
+      // NEW: Emit progress before saving
+      this.emit({ type: "progress", step: "parsing" });
+      
+      // NEW: Save to SQLite (non-blocking)
+      saveResultToDB(result, this.device?.id).then(saved => {
+        this.emit({ type: "progress", step: saved ? "saving" : "complete" });
+      });
+      
       this.emit({ type: "result", result });
-      // Device returns to ready automatically after a reading
       this._setStatus("ready");
       return;
     }
 
-    // ERR:<code>
     if (line.startsWith("ERR:")) {
       const errMessages: Record<string, string> = {
         WARMUP: "Device still warming up — wait 60 s then try again.",
-        RECAL:  "Device is recalibrating — please wait.",
+        RECAL: "Device is recalibrating — please wait.",
         SENSOR: "Sensor fault — check hardware.",
       };
       const code = line.slice(4).trim().toUpperCase();
       this.emit({ type: "error", message: errMessages[code] ?? `Device error: ${code}` });
-      // Error during BAC scan — return to ready if device is healthy
       if (code !== "SENSOR") this._setStatus("ready");
       return;
     }
 
-    // Bare state tokens
     const stateMap: Record<string, DeviceStatus> = {
-      READY:    "ready",
-      WARMUP:   "warmup",
-      SCANNING: "scanning_bac",
-      RECAL:    "recalibrating",
-      STABLE:   "ready",
+      READY: "ready", WARMUP: "warmup", SCANNING: "scanning_bac",
+      RECAL: "recalibrating", STABLE: "ready",
     };
     const bare = stateMap[line.toUpperCase()];
     if (bare) {
       this._setStatus(bare);
-      if (line.toUpperCase() === "RECAL")  this.emit({ type: "recal"  });
+      if (line.toUpperCase() === "RECAL") this.emit({ type: "recal" });
       if (line.toUpperCase() === "STABLE") this.emit({ type: "stable" });
     }
   }
 
-  // ── Status helper — always go through here ────────────────────────────────────
   private _setStatus(s: DeviceStatus): void {
     this.emit({ type: "status", status: s });
   }
 
-  // ── Public commands ────────────────────────────────────────────────────────────
-  async requestScan():   Promise<void> { await this.wq.enqueue("SCAN",   true);  }
+  // ── Public Commands ─────────────────────────────────────────────────────────
+  async requestScan(): Promise<void> { await this.wq.enqueue("SCAN", true); }
   async requestStatus(): Promise<void> { await this.wq.enqueue("STATUS", false); }
-  async ping():          Promise<void> { await this.wq.enqueue("PING",   false); }
+  async ping(): Promise<void> { await this.wq.enqueue("PING", false); }
 
-  // ── Disconnect ────────────────────────────────────────────────────────────────
+  // ── NEW: Get Reading Helper (Main Entry Point) ──────────────────────────────
+  async getReading(options: GetReadingOptions = {}): Promise<GetReadingResult> {
+    const {
+      timeoutMs = DEFAULT_READING_TIMEOUT,
+      requireReady = true,
+      validateSequence = true,
+      onProgress,
+      onAccessibilityAnnouncement,
+      enableQueue = true,
+      maxQueueRetries = 3,
+      queueRetryDelayMs = 2000,
+      testMode = false,
+      mockResult = null,
+    } = options;
+
+    // Test mode override
+    if (testMode) this.testMode = true;
+    
+    // Mock result for testing
+    if (mockResult) {
+      onProgress?.("command_sent");
+      onProgress?.("awaiting_sensor");
+      onProgress?.("parsing");
+      await _sleep(1500); // Simulate sensor delay
+      onProgress?.("saving");
+      await saveResultToDB(mockResult, this.device?.id);
+      onProgress?.("complete");
+      onAccessibilityAnnouncement?.(
+        `Reading complete. ${mockResult.overLimit ? 'Over limit' : 'Within limit'}. ${mockResult.bacPercent}.`,
+        "assertive"
+      );
+      return { success: true, result: mockResult, savedToDB: true };
+    }
+
+    // Validate preconditions
+    if (!this.isConnected()) {
+      return { success: false, error: "device_not_ready", message: "No device connected", requiresConfirmation: true };
+    }
+    
+    const currentStatus = this.getStatus();
+    if (requireReady && currentStatus !== "ready" && currentStatus !== "connected") {
+      return { success: false, error: "device_not_ready", message: "Device not ready", requiresConfirmation: true };
+    }
+    
+    if (this._status === "scanning_bac") {
+      return { success: false, error: "already_reading", message: "Already reading", requiresConfirmation: false };
+    }
+
+    // Enter loading state
+    onProgress?.("command_sent");
+    onAccessibilityAnnouncement?.("Reading started. Please blow steadily into the device.", "assertive");
+
+    try {
+      // Send SCAN command
+      await this.requestScan();
+      onProgress?.("awaiting_sensor");
+      onAccessibilityAnnouncement?.("Sensor active. Blow now.", "assertive");
+
+      // Wait for result with timeout
+      const result = await Promise.race([
+        new Promise<BACResult>((resolve) => {
+          const unsub = this.on((event) => {
+            if (event.type === "result") {
+              unsub();
+              resolve(event.result);
+            }
+          });
+        }),
+        _sleep(timeoutMs).then(() => { throw new Error("TIMEOUT"); })
+      ]);
+
+      // Validate sequence if enabled
+      if (validateSequence && !testMode && result.sequence !== undefined) {
+        if (result.sequence <= this.lastSequence) {
+          return { success: false, error: "parse_error", message: "Rejected stale packet", requiresConfirmation: true };
+        }
+        this.lastSequence = result.sequence;
+      }
+
+      // Save to DB (non-blocking but wait for progress update)
+      onProgress?.("parsing");
+      const saved = await saveResultToDB(result, this.device?.id);
+      onProgress?.(saved ? "saving" : "complete");
+      
+      // Accessibility announcement
+      onAccessibilityAnnouncement?.(
+        `Reading complete. ${result.overLimit ? 'Over legal limit — FAIL' : 'Within legal limit — PASS'}. ${result.bacPercent}.`,
+        "assertive"
+      );
+      
+      onProgress?.("complete");
+      return { success: true, result, savedToDB: saved };
+
+    } catch (err: any) {
+      const isTimeout = err?.message === "TIMEOUT";
+      const isBleDrop = !this.isConnected();
+      
+      // Handle BLE drop with queue
+      if (isBleDrop && enableQueue) {
+        this.commandQueue.enqueue({
+          type: "SCAN",
+          payload: null,
+          maxRetries: maxQueueRetries,
+          queueRetryDelayMs: queueRetryDelayMs,
+          timeoutMs: timeoutMs,
+        });
+        
+        onAccessibilityAnnouncement?.(
+          "Connection lost. Command queued for retry when device reconnects.",
+          "polite"
+        );
+        
+        return { 
+          success: false, 
+          error: "ble_drop", 
+          message: "Connection lost — command queued",
+          queued: true,
+          requiresConfirmation: true
+        };
+      }
+      
+      // Timeout or other error
+      onAccessibilityAnnouncement?.(
+        isTimeout ? "Reading timed out. Please try again." : "Reading failed. Please try again.",
+        "assertive"
+      );
+      
+      return { 
+        success: false, 
+        error: isTimeout ? "timeout" : "parse_error",
+        message: isTimeout ? "Device took too long to respond" : err?.message,
+        requiresConfirmation: true
+      };
+      
+    } finally {
+      // Cleanup is handled by context/events, but ensure progress ends
+      onProgress?.("complete");
+    }
+  }
+
+  // ── Disconnect ──────────────────────────────────────────────────────────────
   async disconnect(): Promise<void> {
     if (this._isDisconnecting) return;
-    this._isDisconnecting       = true;
+    this._isDisconnecting = true;
     this._intentionalDisconnect = true;
 
     this._clearRetryTimer();
     this._stopHeartbeat();
     this.retryCount = 0;
     this.wq.drain();
+    this.commandQueue.clear(); // Clear pending commands on intentional disconnect
     this._teardownMonitor();
 
     try { await this.device?.cancelConnection(); } catch { /* expected */ }
 
-    this.device      = null;
-    this.rxBuffer    = "";
+    this.device = null;
+    this.rxBuffer = "";
     this._isDisconnecting = false;
     this._setStatus("disconnected");
   }
 
-  // ── Internal cleanup (unexpected drops) ───────────────────────────────────────
+  // ── Internal Cleanup ────────────────────────────────────────────────────────
   private _cleanupDevice(errorMessage: string | null): void {
     this._stopHeartbeat();
     this.wq.drain();
     this._teardownMonitor();
-    this.device   = null;
+    this.device = null;
     this.rxBuffer = "";
     if (errorMessage) this.emit({ type: "error", message: errorMessage });
     this._setStatus("disconnected");
@@ -569,15 +965,14 @@ export class BreathalyserManager {
   }
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function _sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
 async function _withTimeout<T>(
   promise: Promise<T>,
-  ms:      number,
+  ms: number,
   message: string
 ): Promise<T> {
   let timer!: ReturnType<typeof setTimeout>;
@@ -606,13 +1001,14 @@ function _safeFloat(raw: string): number {
 function _friendlyError(err: any): string {
   const code = err?.errorCode ?? err?.code;
   switch (code) {
-    case 2:   return "Connection cancelled — please try again.";
-    case 3:   return "Connection timed out — ensure BlowSafe is on and nearby.";
+    case 2: return "Connection cancelled — please try again.";
+    case 3: return "Connection timed out — ensure BlowSafe is on and nearby.";
     case 200: return "Connection failed — move closer and try again.";
     case 203: return "Device already connected.";
     case 205: return "Device not connected.";
-    default:  return err?.message ?? "Connection failed — please try again.";
+    default: return err?.message ?? "Connection failed — please try again.";
   }
 }
 
+// ── Singleton Export ──────────────────────────────────────────────────────────
 export const breathalyser = new BreathalyserManager();

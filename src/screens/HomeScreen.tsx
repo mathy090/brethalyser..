@@ -2,6 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
   View, Text, StyleSheet, StatusBar,
   Image, TouchableOpacity, ScrollView, Animated, ActivityIndicator,
+  Modal,
 } from "react-native";
 import { SafeAreaView }     from "react-native-safe-area-context";
 import { useOfficer }       from "../context/OfficerContext";
@@ -18,7 +19,7 @@ import {
 import { type DriverData }  from "../helpers/constants";
 import DriverCard           from "../features/home/DriverCard";
 
-// ── Pulse ring ────────────────────────────────────────────────────────────────
+// ── Pulse ring ──────────────────────────────────────────────────────────────
 function PulseRing({ active, color }: { active: boolean; color: string }) {
   const anim = useRef(new Animated.Value(0)).current;
   const loop = useRef<Animated.CompositeAnimation | null>(null);
@@ -55,7 +56,7 @@ function PulseRing({ active, color }: { active: boolean; color: string }) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────
 export default function HomeScreen() {
   const { officer }          = useOfficer();
   const { isConnected }      = useNetworkStatus();
@@ -71,10 +72,28 @@ export default function HomeScreen() {
     connectedName,
     clearResult,
     requestScan,
+    getReading,              // ← Enhanced helper
+    announceAccessibility,   // ← Accessibility emitter
+    pendingQueueCount,       // ← Offline queue count
   } = useBreathalyser();
 
   const [driverValid,  setDriverValid]  = useState(false);
   const [licencePhoto, setLicencePhoto] = useState<string | null>(null);
+  
+  // ← NEW: State for enhanced flow (no UI layout changes)
+  const [showRetryModal, setShowRetryModal] = useState(false);
+  const [pendingRetryAction, setPendingRetryAction] = useState<(() => void) | null>(null);
+  const [queueBannerVisible, setQueueBannerVisible] = useState(true);
+  const [accessibilityMsg, setAccessibilityMsg] = useState("");
+  const [accessibilityPriority, setAccessibilityPriority] = useState<"assertive" | "polite">("polite");
+
+  // ← Auto-clear accessibility messages to avoid screen reader spam
+  useEffect(() => {
+    if (accessibilityMsg) {
+      const t = setTimeout(() => setAccessibilityMsg(""), 2500);
+      return () => clearTimeout(t);
+    }
+  }, [accessibilityMsg]);
 
   const handleDriverChange = useCallback(
     (_data: DriverData, isValid: boolean, photoUri: string | null) => {
@@ -134,20 +153,60 @@ export default function HomeScreen() {
     deviceConnected                  ? "No reading yet"        :
     "Connect breathalyser to read";
 
-  // ── Get reading — no local loading state, driven by isAwaitingBac ────────
+  // ── Get reading — enhanced with confirmation, accessibility, queue ───────
   const handleGetReading = useCallback(async () => {
     if (isAwaitingBac) return;
     if (bacResult) clearResult();
     try {
-      await triggerReading(bleStatus, requestScan);
+      const outcome = await getReading({
+        timeoutMs: 45_000,
+        onAccessibilityAnnouncement: (msg: string, priority?: "assertive" | "polite") => {
+          setAccessibilityMsg(msg);
+          setAccessibilityPriority(priority ?? "polite");
+          announceAccessibility?.(msg, priority);
+        },
+      });
+
+      if (!outcome.success && outcome.requiresConfirmation) {
+        setPendingRetryAction(() => async () => {
+          await requestScan();
+        });
+        setShowRetryModal(true);
+      } else if (!outcome.success) {
+        console.log("[HomeScreen] Reading failed:", outcome.message);
+      }
     } catch (err: any) {
       console.log("[HomeScreen] GetReading error:", err.message);
     }
-  }, [isAwaitingBac, bacResult, bleStatus, clearResult, requestScan]);
+  }, [isAwaitingBac, bacResult, bleStatus, clearResult, getReading, requestScan, announceAccessibility]);
+
+  // ← Retry confirmation handler
+  const handleRetryConfirm = useCallback((confirmed: boolean) => {
+    setShowRetryModal(false);
+    if (confirmed && pendingRetryAction) {
+      pendingRetryAction();
+      setPendingRetryAction(null);
+    }
+  }, [pendingRetryAction]);
 
   return (
     <SafeAreaView style={s.root} edges={["top"]}>
       <StatusBar barStyle="light-content" backgroundColor="#121212" />
+
+      {/* ── Queue banner (minimal addition, no layout shift) ─────────────── */}
+      {pendingQueueCount > 0 && queueBannerVisible && (
+        <View style={s.queueBanner}>
+          <Text style={s.queueBannerText}>
+            ⏳ {pendingQueueCount} reading{pendingQueueCount > 1 ? "s" : ""} queued for retry
+          </Text>
+          <TouchableOpacity 
+            onPress={() => setQueueBannerVisible(false)} 
+            hitSlop={{ top: 8, right: 8, bottom: 8, left: 8 }}
+          >
+            <Text style={s.queueBannerDismiss}>✕</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* ── Top bar ───────────────────────────────────────────────────── */}
       <View style={s.topBar}>
@@ -323,11 +382,55 @@ export default function HomeScreen() {
         </Text>
 
       </ScrollView>
+
+      {/* ── Accessibility live region (visually hidden, no layout impact) ─ */}
+      <View
+        accessibilityLiveRegion={accessibilityPriority}
+        accessibilityLabel={accessibilityMsg}
+        style={{ position: "absolute", opacity: 0, height: 1, width: 1 }}
+        pointerEvents="none"
+        importantForAccessibility="yes"
+      >
+        <Text>{accessibilityMsg}</Text>
+      </View>
+
+      {/* ── Retry confirmation modal (overlay, no layout shift) ─────────── */}
+      <Modal
+        visible={showRetryModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => handleRetryConfirm(false)}
+      >
+        <View style={s.modalOverlay}>
+          <View style={s.modalContent}>
+            <Text style={s.modalTitle}>Reading Interrupted</Text>
+            <Text style={s.modalMessage}>
+              The breathalyser connection was lost. Would you like to retry the reading?
+            </Text>
+            <View style={s.modalButtons}>
+              <TouchableOpacity
+                style={[s.modalBtn, s.modalBtnSecondary]}
+                onPress={() => handleRetryConfirm(false)}
+                hitSlop={{ top: 12, right: 12, bottom: 12, left: 12 }}
+              >
+                <Text style={s.modalBtnTextSecondary}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.modalBtn, s.modalBtnPrimary]}
+                onPress={() => handleRetryConfirm(true)}
+                hitSlop={{ top: 12, right: 12, bottom: 12, left: 12 }}
+              >
+                <Text style={s.modalBtnTextPrimary}>Retry</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
 
-// ── Styles ────────────────────────────────────────────────────────────────────
+// ── Styles ───────────────────────────────────────────────────────────────────
 const s = StyleSheet.create({
   root:            { flex: 1, backgroundColor: "#121212" },
   topBar:          { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.05)" },
@@ -344,6 +447,33 @@ const s = StyleSheet.create({
   statusText:      { fontSize: 10, fontWeight: "700" },
   scroll:          { flex: 1 },
   content:         { padding: 12, paddingBottom: 40 },
+
+  // Queue banner (minimal, non-intrusive)
+  queueBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "rgba(30,144,255,0.12)",
+    borderLeftWidth: 3,
+    borderLeftColor: "#1e90ff",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 10,
+    marginHorizontal: 12,
+  },
+  queueBannerText: {
+    color: "#1e90ff",
+    fontSize: 11,
+    fontWeight: "600",
+    flex: 1,
+  },
+  queueBannerDismiss: {
+    color: "#1e90ff",
+    fontSize: 14,
+    fontWeight: "700",
+    paddingHorizontal: 8,
+  },
 
   // Device bar
   deviceBar:       { flexDirection: "row", alignItems: "center", gap: 8, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 12, borderWidth: 1 },
@@ -410,4 +540,63 @@ const s = StyleSheet.create({
   uploadBtnTextOff: { color: "#333" },
   uploadHint:       { color: "#444", fontSize: 10, textAlign: "center", marginTop: 4 },
   legalNote:        { color: "#2a2a2a", fontSize: 9, textAlign: "center", marginTop: 12 },
+
+  // Modal styles (overlay, no layout impact)
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.75)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+  },
+  modalContent: {
+    backgroundColor: "#1a1a1a",
+    borderRadius: 16,
+    padding: 20,
+    width: "100%",
+    maxWidth: 340,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+    elevation: 8,
+  },
+  modalTitle: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "700",
+    marginBottom: 10,
+  },
+  modalMessage: {
+    color: "#aaa",
+    fontSize: 13,
+    lineHeight: 19,
+    marginBottom: 24,
+  },
+  modalButtons: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 12,
+  },
+  modalBtn: {
+    paddingHorizontal: 18,
+    paddingVertical: 11,
+    borderRadius: 10,
+    minWidth: 84,
+    alignItems: "center",
+  },
+  modalBtnPrimary: {
+    backgroundColor: "#1DB954",
+  },
+  modalBtnSecondary: {
+    backgroundColor: "rgba(255,255,255,0.1)",
+  },
+  modalBtnTextPrimary: {
+    color: "#000",
+    fontWeight: "700",
+    fontSize: 14,
+  },
+  modalBtnTextSecondary: {
+    color: "#fff",
+    fontWeight: "600",
+    fontSize: 14,
+  },
 });
