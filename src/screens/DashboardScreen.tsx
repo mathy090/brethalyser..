@@ -1,7 +1,7 @@
 /**
  * src/screens/DashboardScreen.tsx
  * Admin dashboard for managing officers - role/status toggles + import
- * Architecture: Matches authService.ts pattern, uses secureStorage, @env
+ * Fixed: Added unique keys to dropdown map items
  */
 
 import React, { useState, useEffect, useCallback } from "react";
@@ -21,10 +21,10 @@ import {
 import { useNavigation } from "@react-navigation/native";
 import { useOfficer } from "../context/OfficerContext";
 import { logoutOfficer } from "../auth/authService";
-import { getToken } from "../security/secureStorage"; // ✅ Your Keychain-based storage
+import { getToken } from "../security/secureStorage";
 import { io, Socket } from "socket.io-client";
 import axios from "axios";
-import { BACKEND_URL } from "@env"; // ✅ Your react-native-dotenv setup
+import { BACKEND_URL } from "@env";
 
 // Types
 type Officer = {
@@ -40,7 +40,6 @@ type Officer = {
 
 type DropdownState = { id: string; field: "role" | "status" } | null;
 
-// ✅ URLs: BACKEND_URL = "https://brethalyser.onrender.com" (no /api suffix)
 const API_BASE = BACKEND_URL || "http://localhost:5000";
 const SOCKET_BASE = API_BASE;
 
@@ -60,7 +59,7 @@ export default function DashboardScreen() {
   const [dropdownOpen, setDropdownOpen] = useState<DropdownState>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
 
-  // ─── Socket Setup: Listen for roleUpdate events ───────────────────────────
+  // ─── Socket Setup ─────────────────────────────────────────────────────────
   useEffect(() => {
     const socketInstance = io(SOCKET_BASE, {
       transports: ["websocket"],
@@ -122,7 +121,6 @@ export default function DashboardScreen() {
     try {
       setLoading(true);
       const token = await getValidToken();
-      // ✅ Path matches backend: /api/admin/officers
       const response = await axios.get(`${API_BASE}/api/admin/officers`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -161,14 +159,12 @@ export default function DashboardScreen() {
     const original = officers.find((o) => o._id === id);
     if (!original) return;
 
-    // 1. Optimistic UI update
     setOfficers((prev) =>
       prev.map((o) => (o._id === id ? { ...o, [field]: newValue } : o))
     );
 
     try {
       const token = await getValidToken();
-      // ✅ Paths match backend routes
       const endpoint =
         field === "role"
           ? `${API_BASE}/api/admin/officers/${id}/role`
@@ -182,7 +178,6 @@ export default function DashboardScreen() {
     } catch (error: any) {
       console.error("Update failed, rolling back:", error);
       Alert.alert("Update failed", error.message === "NO_TOKEN" ? "Session expired" : "Changes reverted");
-      // Rollback on error
       setOfficers((prev) =>
         prev.map((o) =>
           o._id === id ? { ...o, [field]: original[field] } : o
@@ -192,7 +187,7 @@ export default function DashboardScreen() {
     }
   };
 
-  // ─── Import Officer (Open Endpoint - No Auth) ─────────────────────────────
+  // ─── Import Officer ───────────────────────────────────────────────────────
   const handleImport = async () => {
     if (!newOfficerId.trim() || !newEmail.trim()) {
       Alert.alert("Missing fields", "Please enter both Officer ID and Email");
@@ -200,7 +195,6 @@ export default function DashboardScreen() {
     }
 
     try {
-      // ✅ Import endpoint is open (no auth header)
       await axios.post(`${API_BASE}/api/admin/officers/import`, {
         officers: [
           {
@@ -269,12 +263,15 @@ export default function DashboardScreen() {
             </TouchableOpacity>
             {isDropdownOpen && dropdownField === "role" && (
               <View style={styles.dropdownMenu}>
-                {VALID_ROLES.map((role) =>
-                  renderDropdownItem(role, item.role, () => {
-                    setDropdownOpen(null);
-                    if (item.role !== role) updateOfficerOptimistic(item._id, "role", role);
-                  })
-                )}
+                {/* ✅ FIX: Added key={role} */}
+                {VALID_ROLES.map((role) => (
+                  <React.Fragment key={role}>
+                    {renderDropdownItem(role, item.role, () => {
+                      setDropdownOpen(null);
+                      if (item.role !== role) updateOfficerOptimistic(item._id, "role", role);
+                    })}
+                  </React.Fragment>
+                ))}
               </View>
             )}
           </View>
@@ -291,12 +288,15 @@ export default function DashboardScreen() {
             </TouchableOpacity>
             {isDropdownOpen && dropdownField === "status" && (
               <View style={styles.dropdownMenu}>
-                {VALID_STATUSES.map((status) =>
-                  renderDropdownItem(status, item.status, () => {
-                    setDropdownOpen(null);
-                    if (item.status !== status) updateOfficerOptimistic(item._id, "status", status);
-                  })
-                )}
+                {/* ✅ FIX: Added key={status} */}
+                {VALID_STATUSES.map((status) => (
+                  <React.Fragment key={status}>
+                    {renderDropdownItem(status, item.status, () => {
+                      setDropdownOpen(null);
+                      if (item.status !== status) updateOfficerOptimistic(item._id, "status", status);
+                    })}
+                  </React.Fragment>
+                ))}
               </View>
             )}
           </View>
@@ -364,27 +364,27 @@ export default function DashboardScreen() {
   );
 }
 
-// ─── Styles (Dark Theme Matching RoleChangedScreen) ─────────────────────────
+// ─── Styles ─────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#121212" },
+  container: { flex: 1, backgroundColor: "#000000a7" },
   centered: { flex: 1, justifyContent: "center", alignItems: "center" },
-  loadingText: { color: "#888", marginTop: 12, fontSize: 14 },
+  loadingText: { color: "#3a00f9", marginTop: 12, fontSize: 20 },
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 16, backgroundColor: "#1E1E1E", borderBottomWidth: 1, borderBottomColor: "#2A2A2A" },
   headerTitle: { color: "#fff", fontSize: 20, fontWeight: "bold" },
   addButton: { backgroundColor: "#1DB954", paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 },
-  addButtonText: { color: "#fff", fontWeight: "600", fontSize: 14 },
-  listContent: { padding: 16 },
-  card: { backgroundColor: "#1E1E1E", borderRadius: 12, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: "#2A2A2A" },
+  addButtonText: { color: "#000000e3", fontWeight: "600", fontSize: 10},
+  listContent: { padding: 4 },
+  card: { backgroundColor: "#0000009e", borderRadius: 12, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: "#0000009b" },
   cardHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 },
   officerId: { color: "#fff", fontSize: 16, fontWeight: "bold" },
   email: { color: "#888", fontSize: 14, marginTop: 2 },
-  statusBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
-  statusBadgeText: { color: "#fff", fontSize: 11, fontWeight: "600" },
-  controlsRow: { flexDirection: "row", justifyContent: "space-between", borderTopWidth: 1, borderTopColor: "#2A2A2A", paddingTop: 12 },
+  statusBadge: { paddingHorizontal: 30, paddingVertical: 12, borderRadius: 40, alignItems: "center", justifyContent: "center" },
+  statusBadgeText: { color: "#fff", fontSize: 10, fontWeight: "600", flexShrink: 1},
+  controlsRow: { flexDirection: "row", justifyContent: "space-between", borderTopWidth: 1, borderTopColor: "#00000091", paddingTop: 2 },
   dropdown: { position: "relative", minWidth: 110 },
   dropdownTrigger: { flexDirection: "row", alignItems: "center", padding: 8, backgroundColor: "#2A2A2A", borderRadius: 8, borderWidth: 1, borderColor: "#3A3A3A" },
   dropdownLabel: { color: "#666", fontSize: 11, marginRight: 4 },
-  dropdownValue: { color: "#fff", fontSize: 13, fontWeight: "600", flex: 1 },
+  dropdownValue: { color: "#fff", fontSize: 13, fontWeight: "600", flexShrink: 1 },
   dropdownArrow: { color: "#666", fontSize: 9 },
   dropdownMenu: { position: "absolute", top: "100%", left: 0, right: 0, backgroundColor: "#1E1E1E", borderRadius: 8, borderWidth: 1, borderColor: "#3A3A3A", marginTop: 4, zIndex: 100, elevation: 10, shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 6 },
   dropdownItem: { padding: 12, borderBottomWidth: 1, borderBottomColor: "#2A2A2A" },
@@ -393,7 +393,7 @@ const styles = StyleSheet.create({
   emptyText: { textAlign: "center", color: "#666", marginTop: 40, fontSize: 14 },
   modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.8)", justifyContent: "center", alignItems: "center" },
   modalContent: { width: "90%", backgroundColor: "#1E1E1E", borderRadius: 16, padding: 24, borderWidth: 1, borderColor: "#333" },
-  modalTitle: { color: "#fff", fontSize: 18, fontWeight: "bold", marginBottom: 20, textAlign: "center" },
+  modalTitle: { color: "#fff", fontSize: 16, fontWeight: "bold", marginBottom: 20, textAlign: "center" },
   input: { backgroundColor: "#2A2A2A", color: "#fff", borderRadius: 10, padding: 14, marginBottom: 16, fontSize: 16, borderWidth: 1, borderColor: "#3A3A3A" },
   modalButtons: { flexDirection: "row", justifyContent: "space-between", marginTop: 8 },
   btn: { flex: 1, padding: 14, borderRadius: 10, alignItems: "center", marginHorizontal: 6 },
