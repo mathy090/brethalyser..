@@ -598,5 +598,4 @@ const s = StyleSheet.create({
     color: "#fff",
     fontWeight: "600",
     fontSize: 14,
-  },
-});
+  },});

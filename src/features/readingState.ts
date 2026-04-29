@@ -65,12 +65,7 @@ export function canPressReading(state: ReadingState, isAwaitingBac: boolean): bo
   return state === "ready" || state === "done_pass" || state === "done_fail";
 }
 
-export async function triggerReading(
-  bleStatus: DeviceStatus,
-  requestScan: () => Promise<void>,
-): Promise<void> {
-  if (bleStatus === "connected") {
-    await new Promise<void>(r => setTimeout(r, 600));
-  }
-  await requestScan();
+// ✅ REPLACE trigger function
+export async function triggerReadingSimple(): Promise<void> {
+  await breathalyser.requestScan();
 }

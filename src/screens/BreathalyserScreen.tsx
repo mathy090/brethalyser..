@@ -16,18 +16,23 @@ import { State } from "react-native-ble-plx";
 import { breathalyser, type ScannedDevice } from "../features/breathalyser";
 import { useBreathalyser } from "../context/BreathalyserContext";
 import { usePermissions } from "../hooks/usePermissions";
+import { usePersistentBLE } from "../hooks/usePersistentBLE"; 
 
 // ─── Error helpers ────────────────────────────────────────────────────────────
 function toFriendlyError(raw: string): string {
   if (!raw) return "";
   const lower = raw.toLowerCase();
+  
+  // ✅ FIX 1: Distinct message for System Bluetooth OFF or Permission issues
   if (lower.includes("permission")) return "Bluetooth permission denied. Enable it in Settings.";
-  if (lower.includes("powered") || lower.includes("bluetooth is off")) return "Bluetooth is off. Turn it on first.";
   if (lower.includes("cancelled")) return "Connection was cancelled. Please try again.";
   if (lower.includes("timed out") || lower.includes("timeout")) return "Connection timed out. Make sure BlowSafe is on and nearby.";
   if (lower.includes("already connected")) return "Device is already connected.";
   if (lower.includes("not connected")) return "Device is not connected.";
+  
+  // ✅ FIX 2: Distinct message for Scan/Discovery failure
   if (lower.includes("no devices")) return "No devices found. Ensure BlowSafe is powered on and nearby.";
+  
   return raw;
 }
 
@@ -203,18 +208,30 @@ export default function BreathalyserScreen() {
     pendingQueueCount,
   } = useBreathalyser();
 
+  // ✅ 2. ADD this hook inside your component (top of function)
+  const {
+    autoConnectOnMount,
+    handleManualDisconnect,
+  } = usePersistentBLE();
+
   // ← LOCAL UI STATE ONLY (not in context)
   const [devices, setDevices] = useState<ScannedDevice[]>([]);
   const [scanning, setScanning] = useState(false);
   const [connectingId, setConnectingId] = useState<string | null>(null);
-  const [connectedId, setConnectedId] = useState<string | null>(null); // ← Local only
+  const [connectedId, setConnectedId] = useState<string | null>(null);
   const [scanErr, setScanErr] = useState("");
   const [bleOff, setBleOff] = useState(false);
   const [showRetryModal, setShowRetryModal] = useState(false);
-  const [pendingRetryAction, setPendingRetryAction] = useState<(() => void) | null>(null);
+  // ❌ REMOVED: pendingRetryAction state
   const [queueBannerVisible, setQueueBannerVisible] = useState(true);
   const [accessibilityMessage, setAccessibilityMessage] = useState("");
   const [accessibilityPriority, setAccessibilityPriority] = useState<"assertive" | "polite">("polite");
+
+  // ✅ PATCH 4 — SAFETY GUARD (HARD BLOCK)
+  const safeGetReading = () => {
+    if (status !== "ready") return;
+    breathalyser.getReading();
+  };
 
   // Auto-clear accessibility messages
   useEffect(() => {
@@ -231,14 +248,27 @@ export default function BreathalyserScreen() {
     }
   }, [isConnected]);
 
-  // ── BLE event subscription ──────────────────────────────────────────────────
+  // ✅ 3. REPLACE your mount useEffect
   useEffect(() => {
-    setBleOff(breathalyser.getBLEState() === State.PoweredOff);
-
     const unsub = breathalyser.on((event) => {
       switch (event.type) {
         case "ble_state":
-          setBleOff(event.state === State.PoweredOff);
+          // ✅ ONLY treat as OFF if it's explicitly PoweredOff
+          const isOff = event.state === State.PoweredOff;
+
+          // ❗ Ignore unstable states like Unknown / Resetting
+          if (event.state === State.Unknown || event.state === State.Resetting) {
+            return;
+          }
+
+          setBleOff(isOff);
+
+          if (isOff) {
+            setConnectedId(null);
+            setDevices([]);
+            setScanning(false);
+          }
+
           break;
 
         case "scan_result":
@@ -250,10 +280,15 @@ export default function BreathalyserScreen() {
             setConnectingId(null);
             setScanning(false);
             setScanErr("");
+
+            // 🔧 PATCH 1 — Fix connectedId sync (CRITICAL) + Safer Fallback
+            if ((event as any).deviceId || connectingId) {
+              setConnectedId((event as any).deviceId ?? connectingId);
+            }
           }
           if (event.status === "disconnected") {
             setConnectingId(null);
-            setConnectedId(null); // ← Local state update
+            setConnectedId(null);
             setScanning(false);
           }
           break;
@@ -262,6 +297,18 @@ export default function BreathalyserScreen() {
           setConnectingId(null);
           setScanning(false);
           setScanErr(toFriendlyError(event.message));
+
+          // ❌ REMOVE AUTO RETRY ACTION COMPLETELY
+          // setPendingRetryAction(null); // State removed entirely
+
+          // Only show modal if you want user decision
+          if (
+            event.message?.toLowerCase().includes("disconnect") ||
+            event.message?.toLowerCase().includes("lost")
+          ) {
+            setShowRetryModal(true);
+          }
+
           break;
 
         case "accessibility":
@@ -281,8 +328,19 @@ export default function BreathalyserScreen() {
       }
     });
 
+    // autoConnectOnMount(); ❌ disable auto connect - PATCH 2
+
+    // ✅ FIX: Add autoConnectOnMount to dependencies to prevent stale closures
     return () => unsub();
-  }, []);
+  }, [autoConnectOnMount]);
+
+  // 🔧 PATCH 2 — Stop polling when not needed (removed as event listener handles state)
+  useEffect(() => {
+    if (!isConnected) return;
+
+    // Connection state is already tracked via breathalyser.on() events
+    // No manual polling needed
+  }, [isConnected]);
 
   // ── Handlers ────────────────────────────────────────────────────────────────
   const handleOpenBTSettings = useCallback(() => {
@@ -307,6 +365,7 @@ export default function BreathalyserScreen() {
     } catch (err: any) {
       setScanErr(toFriendlyError(err?.message ?? "Scan failed. Try again."));
     } finally {
+      // ✅ Better fix: Let BLE state control UI, not local guesswork
       setScanning(false);
     }
   }, [requestBluetooth]);
@@ -316,31 +375,34 @@ export default function BreathalyserScreen() {
     setConnectingId(device.id);
     setScanErr("");
     try {
+      // ✅ 5. UPDATE connect handler (no logic change — persistence handled in helper)
       await breathalyser.connect(device);
-      setConnectedId(device.id); // ← Local state update
+      setConnectedId(device.id);
     } catch (err: any) {
       setScanErr(toFriendlyError(err?.message ?? "Connection failed. Try again."));
       setConnectingId(null);
     }
   }, [connectingId, isConnected]);
 
+  // ✅ 4. REPLACE disconnect handler
   const handleDisconnect = useCallback(async () => {
     breathalyser.stopScan();
-    await breathalyser.disconnect();
+    await handleManualDisconnect(); // ✅ use helper
     clearResult();
     setDevices([]);
     setScanErr("");
     setConnectingId(null);
-    setConnectedId(null); // ← Local state update
-  }, [clearResult]);
+    setConnectedId(null);
+  }, [clearResult, handleManualDisconnect]);
 
   const handleRetryConfirm = useCallback((confirmed: boolean) => {
     setShowRetryModal(false);
-    if (confirmed && pendingRetryAction) {
-      pendingRetryAction();
-      setPendingRetryAction(null);
+    // ✅ With explicit manual retry only (recommended)
+    if (confirmed) {
+      // ❌ DO NOT AUTO TRIGGER - PATCH 3
+      // breathalyser.getReading?.(); 
     }
-  }, [pendingRetryAction]);
+  }, []);
 
   // ── Derived display values ──────────────────────────────────────────────────
   const isWarmup = status === "warmup";
@@ -351,11 +413,11 @@ export default function BreathalyserScreen() {
   const isError = status === "error";
   const isReady = status === "ready";
   const isReconnecting = (isCtxConnect || isCtxScan) && connectingId === null && !scanning;
-  const canScan = !bleOff && !isConnected && !scanning && connectingId === null;
+  const canScan = !bleOff && !isConnected && connectingId === null;
 
   const statusLabel =
     isWarmup ? "Warming up — wait ~60s after power on" :
-    isReady ? "Ready — tap Get Reading on Home screen" :
+    isReady ? "Ready — tap Get Reading below" : // PATCH 5
     isBacScan ? "BAC scan in progress…" :
     isRecal ? "Recalibrating sensor…" :
     isCtxConnect ? "Connecting to device…" :
@@ -441,6 +503,27 @@ export default function BreathalyserScreen() {
           )}
         </View>
 
+        {/* ── PATCH 1: GET READING BUTTON ────────────────────────────────── */}
+        {isConnected && (
+          <TouchableOpacity
+            style={[
+              s.scanBtn,
+              (status !== "ready") && s.scanBtnOff
+            ]}
+            onPress={safeGetReading}
+            disabled={status !== "ready"}
+            activeOpacity={0.8}
+          >
+            <Text style={s.scanBtnText}>
+              {status === "ready"
+                ? "Get Reading"
+                : status === "warmup"
+                ? "Warming up..."
+                : "Device not ready"}
+            </Text>
+          </TouchableOpacity>
+        )}
+
         {/* ── Scan/connect error ─────────────────────────────────────────── */}
         {!!scanErr && (
           <View style={s.errorBox}>
@@ -473,8 +556,8 @@ export default function BreathalyserScreen() {
               <DeviceRow
                 key={device.id}
                 device={device}
-                connectedId={connectedId} // ← Local state
-                connectingId={connectingId} // ← Local state
+                connectedId={connectedId}
+                connectingId={connectingId}
                 onConnect={() => handleConnect(device)}
                 onDisconnect={handleDisconnect}
               />
@@ -487,7 +570,10 @@ export default function BreathalyserScreen() {
           <View style={s.emptyBox}>
             <Text style={s.emptyIcon}>◉</Text>
             <Text style={s.emptyTitle}>No devices found</Text>
-            <Text style={s.emptyBody}>Power on your BlowSafe breathalyser and make sure it is within range, then tap Scan.</Text>
+            {/* ✅ FIX 3: Clearer empty state text */}
+            <Text style={s.emptyBody}>
+              No devices detected. Make sure the BlowSafe device is powered on, nearby, and in pairing mode.
+            </Text>
           </View>
         )}
 
@@ -598,6 +684,7 @@ const s = StyleSheet.create({
   deviceRowConnected: { borderColor: "rgba(29,185,84,0.35)", backgroundColor: "rgba(29,185,84,0.04)" },
   deviceRowConnecting: { borderColor: "rgba(245,166,35,0.35)", backgroundColor: "rgba(245,166,35,0.04)" },
   deviceRowLeft: { flex: 1, marginRight: 10 },
+  deviceRowRight: { flexShrink: 0 },
   deviceNameLine: { flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" },
   deviceName: { color: "#fff", fontSize: 13, fontWeight: "600" },
   deviceId: { color: "#2a2a2a", fontSize: 9, marginTop: 3 },
