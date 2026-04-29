@@ -12,31 +12,31 @@
 import { Router, type Response } from "express";
 import jwt from "jsonwebtoken";
 
-import { env }                                          from "../config/env";
+import { env } from "../config/env";
 import { verifyFirebaseToken, verifyJWT, type AuthRequest } from "../middleware/verifyToken";
-import { rateLimiter }                                  from "../middleware/rateLimiter";
-import { Officer }                                      from "../models/Officer";
-import { Errors }                                       from "../utils/errors";
-import admin                                            from "../config/firebase";
+import { rateLimiter } from "../middleware/rateLimiter";
+import { Officer } from "../models/Officer";
+import { Errors } from "../utils/errors";
+import admin from "../config/firebase";
 
 const router = Router();
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function signAccessToken(payload: {
-  uid:      string;
+  uid: string;
   officerId: string;
-  role:     string;
-  status:   string;
+  role: string;
+  status: string;
 }): string {
   return jwt.sign(payload, env.JWT_SECRET, { expiresIn: env.JWT_EXPIRES_IN });
 }
 
 function signRefreshToken(payload: {
-  uid:      string;
+  uid: string;
   officerId: string;
-  role:     string;
-  status:   string;
+  role: string;
+  status: string;
 }): string {
   return jwt.sign(
     { ...payload, type: "refresh" },
@@ -55,13 +55,13 @@ router.post(
     try {
       const { officerId, email } = req.body as {
         officerId?: string;
-        email?:    string;
+        email?: string;
       };
 
       // Validate required fields up-front before any DB work.
       const missing: string[] = [];
       if (!officerId?.trim()) missing.push("officerId");
-      if (!email?.trim())     missing.push("email");
+      if (!email?.trim()) missing.push("email");
       if (missing.length > 0) {
         Errors.missingFields(res, missing);
         return;
@@ -69,21 +69,30 @@ router.post(
 
       // All three uniqueness checks in parallel to minimise round trips.
       const [emailDoc, idDoc, uidDoc] = await Promise.all([
-        Officer.findOne({ email:       email!.toLowerCase().trim() }),
-        Officer.findOne({ officerId:   officerId!.trim() }),
+        Officer.findOne({ email: email!.toLowerCase().trim() }),
+        Officer.findOne({ officerId: officerId!.trim() }),
         Officer.findOne({ firebaseUid: req.uid }),
       ]);
 
-      if (emailDoc) { Errors.emailTaken(res);          return; }
-      if (idDoc)    { Errors.officerIdTaken(res);      return; }
-      if (uidDoc)   { Errors.accountAlreadyExists(res); return; }
+      if (emailDoc) {
+        Errors.emailTaken(res);
+        return;
+      }
+      if (idDoc) {
+        Errors.officerIdTaken(res);
+        return;
+      }
+      if (uidDoc) {
+        Errors.accountAlreadyExists(res);
+        return;
+      }
 
       await Officer.create({
-        officerId:   officerId!.trim(),
-        email:       email!.toLowerCase().trim(),
+        officerId: officerId!.trim(),
+        email: email!.toLowerCase().trim(),
         firebaseUid: req.uid,
-        role:        "officer",
-        status:      "approved",
+        role: "officer",
+        status: "approved", // New registrations default to approved (adjust if needed)
       });
 
       res.status(201).json({ message: "Officer registered successfully." });
@@ -134,30 +143,42 @@ router.post(
       } else {
         // First login after registration — create MongoDB record now.
         officer = await Officer.create({
-          officerId:   officerId.trim(),
-          email:       firebaseUser.email?.toLowerCase().trim(),
+          officerId: officerId.trim(),
+          email: firebaseUser.email?.toLowerCase().trim(),
           firebaseUid: req.uid,
-          role:        "officer",
-          status:      "approved",
+          role: "officer",
+          status: "approved",
         });
       }
 
+      // ✅ NEW: Check status — REJECTED = BANNED
+      if (officer.status === "rejected") {
+        Errors.forbidden(res, "Account banned. Contact admin.");
+        return;
+      }
+
+      // ✅ NEW: Check if pending approval (optional, adjust based on your workflow)
+      if (officer.status !== "approved") {
+        Errors.forbidden(res, "Account pending approval. Contact admin.");
+        return;
+      }
+
       const tokenPayload = {
-        uid:       req.uid!,
+        uid: req.uid!,
         officerId: officer.officerId,
-        role:      officer.role,
-        status:    officer.status,
+        role: officer.role,
+        status: officer.status,
       };
 
-      const token        = signAccessToken(tokenPayload);
+      const token = signAccessToken(tokenPayload);
       const refreshToken = signRefreshToken(tokenPayload);
 
       res.status(200).json({
         token,
         refreshToken,
-        role:     officer.role,
-        status:   officer.status,
-        uid:      req.uid,
+        role: officer.role,
+        status: officer.status,
+        uid: req.uid,
         officerId: officer.officerId,
       });
     } catch (err) {
@@ -180,11 +201,11 @@ router.post(
       }
 
       let decoded: {
-        uid:      string;
+        uid: string;
         officerId: string;
-        role:     string;
-        status:   string;
-        type:     string;
+        role: string;
+        status: string;
+        type: string;
       };
 
       try {
@@ -206,17 +227,27 @@ router.post(
         return;
       }
 
+      // ✅ Re-check status on refresh (in case admin banned user while token was valid)
+      if (officer.status === "rejected") {
+        Errors.forbidden(res, "Account banned. Contact admin.");
+        return;
+      }
+      if (officer.status !== "approved") {
+        Errors.forbidden(res, "Account pending approval. Contact admin.");
+        return;
+      }
+
       const newToken = signAccessToken({
-        uid:       decoded.uid,
+        uid: decoded.uid,
         officerId: officer.officerId,
-        role:      officer.role,
-        status:    officer.status,
+        role: officer.role,
+        status: officer.status,
       });
 
       res.status(200).json({
-        token:    newToken,
-        role:     officer.role,
-        status:   officer.status,
+        token: newToken,
+        role: officer.role,
+        status: officer.status,
         officerId: officer.officerId,
       });
     } catch (err) {
@@ -232,12 +263,14 @@ router.post(
   verifyJWT,
   (req: AuthRequest, res: Response): void => {
     res.status(200).json({
-      valid:     true,
-      uid:       req.uid,
+      valid: true,
+      uid: req.uid,
       officerId: req.officerId,
-      role:      req.role,
+      role: req.role,
+      status: req.status, // ✅ Include status for frontend checks
     });
   }
 );
 
+// ✅ CRITICAL: Default export for Bun/ESM compatibility
 export default router;
