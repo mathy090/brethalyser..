@@ -92,7 +92,7 @@ router.post(
         email: email!.toLowerCase().trim(),
         firebaseUid: req.uid,
         role: "officer",
-        status: "approved", // New registrations default to approved (adjust if needed)
+        status: "approved", // New registrations default to approved
       });
 
       res.status(201).json({ message: "Officer registered successfully." });
@@ -151,15 +151,14 @@ router.post(
         });
       }
 
-      // ✅ NEW: Check status — REJECTED = BANNED
+      // ✅ FIX: Direct JSON response instead of undefined Errors.forbidden
       if (officer.status === "rejected") {
-        Errors.forbidden(res, "Account banned. Contact admin.");
+        res.status(403).json({ message: "Account banned" });
         return;
       }
 
-      // ✅ NEW: Check if pending approval (optional, adjust based on your workflow)
       if (officer.status !== "approved") {
-        Errors.forbidden(res, "Account pending approval. Contact admin.");
+        res.status(403).json({ message: "Account pending" });
         return;
       }
 
@@ -227,13 +226,13 @@ router.post(
         return;
       }
 
-      // ✅ Re-check status on refresh (in case admin banned user while token was valid)
+      // ✅ FIX: Direct JSON response instead of undefined Errors.forbidden
       if (officer.status === "rejected") {
-        Errors.forbidden(res, "Account banned. Contact admin.");
+        res.status(403).json({ message: "Account banned" });
         return;
       }
       if (officer.status !== "approved") {
-        Errors.forbidden(res, "Account pending approval. Contact admin.");
+        res.status(403).json({ message: "Account pending" });
         return;
       }
 
@@ -267,7 +266,7 @@ router.post(
       uid: req.uid,
       officerId: req.officerId,
       role: req.role,
-      status: req.status, // ✅ Include status for frontend checks
+      status: req.status,
     });
   }
 );

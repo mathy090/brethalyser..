@@ -1,19 +1,12 @@
 /**
  * src/screens/LoginScreen.tsx
- * Official sign-in with banned/pending status handling
+ * Unified animated banners for backend errors & success messages
  */
 
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
-  Text,
-  TextInput,
-  TouchableOpacity,
-  StyleSheet,
-  ScrollView,
-  Alert,
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
+  View, Text, TextInput, TouchableOpacity, StyleSheet,
+  ActivityIndicator, KeyboardAvoidingView, Platform, ScrollView, Animated,
 } from "react-native";
 import { loginOfficer } from "../auth/authService";
 import { useOfficer } from "../context/OfficerContext";
@@ -32,8 +25,34 @@ export default function LoginScreen({ navigation, route }: Props) {
   const [password, setPassword] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState("");
-  const routeError = route.params?.error;
+
+  // Banner system
+  const [banner, setBanner] = useState<{ message: string; type: "error" | "warning" | "success" } | null>(null);
+  const bannerAnim = useRef(new Animated.Value(0)).current;
+  const bannerTimeout = useRef<NodeJS.Timeout | null>(null);
+
+  const showBanner = (message: string, type: "error" | "warning" | "success" = "error", duration = 3500) => {
+    if (bannerTimeout.current) clearTimeout(bannerTimeout.current);
+    setBanner({ message, type });
+    bannerAnim.setValue(0);
+    Animated.timing(bannerAnim, { toValue: 1, duration: 300, useNativeDriver: true }).start();
+    
+    bannerTimeout.current = setTimeout(() => {
+      Animated.timing(bannerAnim, { toValue: 0, duration: 300, useNativeDriver: true }).start(() => setBanner(null));
+    }, duration);
+  };
+
+  useEffect(() => {
+    // Auto-show success message from ForgotPassword screen
+    if (route.params?.message) {
+      showBanner(route.params.message, "success", 4000);
+      // Clear params after showing
+      navigation.setParams({ message: undefined });
+    }
+    return () => {
+      if (bannerTimeout.current) clearTimeout(bannerTimeout.current);
+    };
+  }, [route.params?.message]);
 
   const validate = () => {
     const e: Record<string, string> = {};
@@ -47,124 +66,51 @@ export default function LoginScreen({ navigation, route }: Props) {
   const handleLogin = async () => {
     if (!validate()) return;
     setLoading(true);
-    setStatus("Verifying credentials...");
 
-    const result = await loginOfficer(
-      officerId,
-      email.trim().toLowerCase(),
-      password
-    );
-
+    const result = await loginOfficer(officerId, email.trim().toLowerCase(), password);
     setLoading(false);
-    setStatus("");
 
     if (result.success) {
-      // ✅ Explicit status checks for better UX
       if (result.status === "rejected") {
-        Alert.alert(
-          "Account Banned",
-          "Your account has been banned. Please contact an administrator for assistance.",
-          [{ text: "OK", style: "default" }]
-        );
+        showBanner("Account banned. Contact admin.", "warning");
         return;
       }
 
-      if (result.status !== "approved") {
-        Alert.alert(
-          "Pending Approval",
-          "Your account is awaiting admin approval. Please wait or contact support.",
-          [{ text: "OK", style: "default" }]
-        );
-        return;
-      }
-
-      // ✅ Approved — proceed to app
-      await setOfficer({
-        uid: result.uid,
-        officerId: result.officerId,
-        role: result.role as any,
-        status: result.status as any,
-      });
+      await setOfficer({ uid: result.uid, officerId: result.officerId, role: result.role as any, status: result.status as any });
       navigation.replace("MainApp");
     } else {
-      // ✅ Show backend error (includes "Account banned. Contact admin.")
-      Alert.alert("Login Failed", result.error);
+      const msg = result.error.toLowerCase().includes("network") || result.error.toLowerCase().includes("connection")
+        ? "Poor internet. Couldn't login."
+        : result.error;
+      showBanner(msg, "error");
     }
   };
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-      style={styles.container}
-    >
-      <ScrollView
-        contentContainerStyle={styles.content}
-        keyboardShouldPersistTaps="handled"
-      >
-        <Text style={styles.title}>Official Sign In</Text>
-        
-        {routeError && <Text style={styles.banner}>{routeError}</Text>}
+    <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.container}>
+      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        {banner && (
+          <Animated.View style={[styles.banner, { opacity: bannerAnim, backgroundColor: banner.type === "error" ? "#FF4C4C" : banner.type === "warning" ? "#FFA500" : "#1DB954" }]}>
+            <Text style={styles.bannerText}>{banner.message}</Text>
+          </Animated.View>
+        )}
 
-        <TextInput
-          style={styles.input}
-          placeholder="Officer ID"
-          placeholderTextColor="#666"
-          value={officerId}
-          onChangeText={setOfficerId}
-          autoCapitalize="characters"
-          editable={!loading}
-          returnKeyType="next"
-          onSubmitEditing={() => emailInputRef?.focus()}
-        />
+        <Text style={styles.title}>Official Sign In</Text>
+
+        <TextInput style={styles.input} placeholder="Officer ID" placeholderTextColor="#666" value={officerId} onChangeText={(t) => { setOfficerId(t); setErrors((e) => ({ ...e, officerId: "" })); }} autoCapitalize="characters" editable={!loading} />
         {errors.officerId && <Text style={styles.error}>{errors.officerId}</Text>}
 
-        <TextInput
-          ref={(ref) => (emailInputRef = ref)}
-          style={styles.input}
-          placeholder="Email"
-          placeholderTextColor="#666"
-          value={email}
-          onChangeText={setEmail}
-          keyboardType="email-address"
-          autoCapitalize="none"
-          editable={!loading}
-          returnKeyType="next"
-          onSubmitEditing={() => passwordInputRef?.focus()}
-        />
+        <TextInput style={styles.input} placeholder="Email" placeholderTextColor="#666" value={email} onChangeText={(t) => { setEmail(t); setErrors((e) => ({ ...e, email: "" })); }} keyboardType="email-address" autoCapitalize="none" editable={!loading} />
         {errors.email && <Text style={styles.error}>{errors.email}</Text>}
 
-        <TextInput
-          ref={(ref) => (passwordInputRef = ref)}
-          style={styles.input}
-          placeholder="Password"
-          placeholderTextColor="#666"
-          value={password}
-          onChangeText={setPassword}
-          secureTextEntry
-          editable={!loading}
-          returnKeyType="go"
-          onSubmitEditing={handleLogin}
-        />
+        <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#666" value={password} onChangeText={(t) => { setPassword(t); setErrors((e) => ({ ...e, password: "" })); }} secureTextEntry editable={!loading} />
         {errors.password && <Text style={styles.error}>{errors.password}</Text>}
 
-        {status ? <Text style={styles.status}>{status}</Text> : null}
-
-        <TouchableOpacity
-          style={[styles.btn, loading && styles.btnDisabled]}
-          onPress={handleLogin}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.btnText}>Sign In</Text>
-          )}
+        <TouchableOpacity style={[styles.btn, loading && styles.btnDisabled]} onPress={handleLogin} disabled={loading}>
+          {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnText}>Sign In</Text>}
         </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.forgotBtn}
-          onPress={() => navigation.navigate("ForgotPassword")}
-        >
+        <TouchableOpacity style={styles.forgotBtn} onPress={() => navigation.navigate("ForgotPassword")}>
           <Text style={styles.forgotText}>Forgot Password?</Text>
         </TouchableOpacity>
       </ScrollView>
@@ -172,81 +118,17 @@ export default function LoginScreen({ navigation, route }: Props) {
   );
 }
 
-// Refs for keyboard navigation
-let emailInputRef: TextInput | null = null;
-let passwordInputRef: TextInput | null = null;
-
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#121212",
-  },
-  content: {
-    padding: 24,
-    paddingTop: 80,
-    paddingBottom: 40,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: "bold",
-    color: "#1DB954",
-    textAlign: "center",
-    marginBottom: 36,
-  },
-  banner: {
-    backgroundColor: "#FF4C4C",
-    color: "#fff",
-    padding: 10,
-    borderRadius: 6,
-    marginBottom: 16,
-    textAlign: "center",
-    fontSize: 13,
-  },
-  input: {
-    backgroundColor: "#1e1e1e",
-    color: "#fff",
-    borderRadius: 8,
-    padding: 14,
-    marginBottom: 4,
-    fontSize: 15,
-    borderWidth: 1,
-    borderColor: "#333",
-  },
-  error: {
-    color: "#FF4C4C",
-    fontSize: 12,
-    marginBottom: 10,
-    marginLeft: 4,
-  },
-  status: {
-    color: "#1DB954",
-    fontSize: 13,
-    textAlign: "center",
-    marginTop: 10,
-    marginBottom: 10,
-  },
-  btn: {
-    backgroundColor: "#1DB954",
-    padding: 15,
-    borderRadius: 25,
-    alignItems: "center",
-    marginTop: 24,
-    marginBottom: 12,
-  },
-  btnDisabled: {
-    opacity: 0.6,
-  },
-  btnText: {
-    color: "#fff",
-    fontSize: 17,
-    fontWeight: "bold",
-  },
-  forgotBtn: {
-    alignItems: "center",
-    marginTop: 8,
-  },
-  forgotText: {
-    color: "#1DB954",
-    fontSize: 14,
-  },
+  container: { flex: 1, backgroundColor: "#121212" },
+  content: { padding: 24, paddingTop: 60 },
+  title: { fontSize: 28, fontWeight: "bold", color: "#1DB954", textAlign: "center", marginBottom: 30 },
+  banner: { padding: 14, borderRadius: 10, marginBottom: 16, alignItems: "center", elevation: 4 },
+  bannerText: { color: "#fff", fontSize: 14, fontWeight: "600", textAlign: "center" },
+  input: { backgroundColor: "#1e1e1e", color: "#fff", borderRadius: 8, padding: 14, marginBottom: 4, fontSize: 15, borderWidth: 1, borderColor: "#333" },
+  error: { color: "#FF4C4C", fontSize: 12, marginBottom: 10, marginLeft: 4 },
+  btn: { backgroundColor: "#1DB954", padding: 15, borderRadius: 25, alignItems: "center", marginTop: 20 },
+  btnDisabled: { opacity: 0.6 },
+  btnText: { color: "#fff", fontSize: 17, fontWeight: "bold" },
+  forgotBtn: { alignItems: "center", marginTop: 16, padding: 10 },
+  forgotText: { color: "#1DB954", fontSize: 14 },
 });
