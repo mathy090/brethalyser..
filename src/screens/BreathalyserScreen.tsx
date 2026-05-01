@@ -1,432 +1,634 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+/**
+ * src/screens/BreathalyserScreen.tsx
+ *
+ * Breathalyser screen — pairs with Arduino R4 over BLE.
+ *
+ * Arduino state machine (from firmware):
+ *   CONNECTED → 30s warmup (STATUS:WARMUP:{remaining}) → STATUS:READY
+ *   On "SCAN" command: STATUS:SCANNING (immediate) → BAC:{value} (~20s later)
+ *
+ * Screen states: disconnected | scanning_devices | connecting |
+ *                warmup | ready | scanning_bac | result
+ */
+
+import React, {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ScrollView,
-  Linking,
-  Animated,
   ActivityIndicator,
-  Platform,
+  Animated,
+  Linking,
   PermissionsAndroid,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { State } from "react-native-ble-plx";
 import { breathalyser, ScannedDevice } from "../features/breathalyser";
 import { useBreathalyser } from "../context/BreathalyserContext";
 import { usePersistentBLE } from "../hooks/usePersistentBLE";
-import { getReading } from "../helpers/getReading";
+import { getReading, ReadingError, ReadingResult } from "../helpers/getReading";
 
-// ─── Helper Components ───────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
 
-function FadingErrorBanner({ message }: { message: string }) {
+type ScreenPhase =
+  | "disconnected"
+  | "scanning_devices"
+  | "connecting"
+  | "warmup"
+  | "ready"
+  | "scanning_bac"
+  | "result";
+
+interface BacResult {
+  bac: number;
+  overLimit: boolean;
+  timestamp: number;
+}
+
+const BAC_LEGAL_LIMIT = 0.08; // Zimbabwe Road Traffic Act
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-components
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ToastBanner({ message }: { message: string }) {
   const opacity = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     opacity.setValue(0);
     Animated.sequence([
-      Animated.timing(opacity, { toValue: 1, duration: 300, useNativeDriver: true }),
-      Animated.timing(opacity, { toValue: 0, duration: 400, useNativeDriver: true, delay: 2500 }),
+      Animated.timing(opacity, { toValue: 1, duration: 250, useNativeDriver: true }),
+      Animated.timing(opacity, { toValue: 0, duration: 400, useNativeDriver: true, delay: 2800 }),
     ]).start();
-  }, [message, opacity]);
+  }, [message]);
 
   return (
-    <Animated.View style={[styles.errorBanner, { opacity }]}>
-      <Text style={styles.errorBannerText}>⚠️ {message}</Text>
+    <Animated.View style={[styles.toast, { opacity }]} pointerEvents="none">
+      <Text style={styles.toastText}>{message}</Text>
     </Animated.View>
   );
 }
 
-function StatusLed({ status }: { status: string }) {
-  const opacity = useRef(new Animated.Value(1)).current;
+function PulseDot({
+  color,
+  pulse,
+}: {
+  color: string;
+  pulse: boolean;
+}) {
+  const scale = useRef(new Animated.Value(1)).current;
   const loopRef = useRef<Animated.CompositeAnimation | null>(null);
-  const pulsing = ["scanning", "connecting", "warmup", "recalibrating"].includes(status);
 
   useEffect(() => {
-    if (pulsing) {
+    loopRef.current?.stop();
+    if (pulse) {
       loopRef.current = Animated.loop(
         Animated.sequence([
-          Animated.timing(opacity, { toValue: 0.2, duration: 550, useNativeDriver: true }),
-          Animated.timing(opacity, { toValue: 1, duration: 550, useNativeDriver: true }),
+          Animated.timing(scale, { toValue: 1.5, duration: 500, useNativeDriver: true }),
+          Animated.timing(scale, { toValue: 1, duration: 500, useNativeDriver: true }),
         ])
       );
       loopRef.current.start();
     } else {
-      loopRef.current?.stop();
-      opacity.setValue(1);
+      scale.setValue(1);
     }
     return () => loopRef.current?.stop();
-  }, [pulsing, opacity]);
+  }, [pulse]);
 
-  const color =
-    status === "connected" || status === "ready" ? "#1DB954"
-    : status === "warmup"       ? "#FFA500"
-    : status === "scanning_bac" || status === "scanning" ? "#1e90ff"
-    : status === "recalibrating" ? "#f5a623"
-    : "#333";
-
-  return <Animated.View style={[styles.led, { backgroundColor: color, opacity }]} />;
+  return (
+    <Animated.View
+      style={[
+        styles.dot,
+        { backgroundColor: color, transform: [{ scale }] },
+      ]}
+    />
+  );
 }
 
-function DeviceRow({
+function DeviceCard({
   device,
-  connectingId,
+  connecting,
   onConnect,
 }: {
   device: ScannedDevice;
-  connectingId: string | null;
+  connecting: boolean;
   onConnect: () => void;
 }) {
-  const isLoading = connectingId === device.id;
   return (
-    <View style={styles.deviceRow}>
-      <View style={styles.deviceRowLeft}>
-        <Text style={styles.deviceName}>{device.name || "BlowSafe"}</Text>
-        <Text style={styles.deviceId}>{device.id}</Text>
+    <View style={styles.deviceCard}>
+      <View style={styles.deviceInfo}>
+        <Text style={styles.deviceName}>{device.name || "BlowSafe Device"}</Text>
+        <Text style={styles.deviceId} numberOfLines={1}>{device.id}</Text>
       </View>
       <TouchableOpacity
-        style={[styles.btnConnect, isLoading && styles.btnLoading]}
+        style={[styles.connectBtn, connecting && styles.connectBtnBusy]}
         onPress={onConnect}
-        disabled={isLoading}
+        disabled={connecting}
+        activeOpacity={0.75}
       >
-        {isLoading
-          ? <ActivityIndicator size="small" color="#fff" />
-          : <Text style={styles.btnConnectText}>CONNECT</Text>
-        }
+        {connecting ? (
+          <ActivityIndicator size="small" color="#fff" />
+        ) : (
+          <Text style={styles.connectBtnText}>CONNECT</Text>
+        )}
       </TouchableOpacity>
     </View>
   );
 }
 
-function BACCard({ result, onClear }: { result: any; onClear: () => void }) {
-  if (!result) return null;
+function WarmupRing({ remaining }: { remaining: number }) {
+  const total = 30;
+  const progress = Math.max(0, Math.min(1, (total - remaining) / total));
+  const circumference = 2 * Math.PI * 44;
+  const dashOffset = circumference * (1 - progress);
+
   return (
-    <View style={[styles.resultCard, result.overLimit ? styles.resultFail : styles.resultPass]}>
-      <Text style={[styles.bacBig, { color: result.overLimit ? "#FF4C4C" : "#1DB954" }]}>
-        {result.bacPercent}
-      </Text>
-      <Text style={styles.bacMg}>{result.bacMg}</Text>
-      <Text style={[styles.verdict, { color: result.overLimit ? "#FF4C4C" : "#1DB954" }]}>
-        {result.overLimit ? "OVER LIMIT" : "PASS"}
-      </Text>
-      <TouchableOpacity onPress={onClear} style={styles.clearBtn}>
-        <Text style={styles.clearText}>CLEAR</Text>
-      </TouchableOpacity>
+    <View style={styles.ringContainer}>
+      <View style={styles.ringSvgWrap}>
+        {/* Background ring */}
+        <View style={[styles.ringTrack, { borderColor: "rgba(255,255,255,0.06)" }]} />
+        {/* Progress ring — simulated with border trick */}
+        <View
+          style={[
+            styles.ringProgress,
+            {
+              borderColor: "#1DB954",
+              transform: [{ rotate: `${-90 + progress * 360}deg` }],
+              opacity: progress > 0 ? 1 : 0,
+            },
+          ]}
+        />
+        <View style={styles.ringCenter}>
+          <Text style={styles.ringNumber}>{remaining}</Text>
+          <Text style={styles.ringLabel}>seconds</Text>
+        </View>
+      </View>
+      <Text style={styles.warmupTitle}>Warming Up</Text>
+      <Text style={styles.warmupSub}>Device is calibrating its sensor. Please wait.</Text>
     </View>
   );
 }
 
-// ─── Main Screen ─────────────────────────────────────────────────────────────
+function BacResultCard({
+  result,
+  onClear,
+}: {
+  result: BacResult;
+  onClear: () => void;
+}) {
+  const scale = useRef(new Animated.Value(0.85)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
 
-export default function BreathalyserScreen() {
-  // All hooks at the top — no conditions before them
-  const {
-    isConnected,
-    deviceStatus,
-    connectMsg,
-    devices,
-    setDevices,
-    history,
-    countdownSeconds,
-  } = useBreathalyser();
-
-  const { autoConnectOnMount, handleManualDisconnect } = usePersistentBLE();
-
-  const [scanning, setScanning]           = useState(false);
-  const [connectingId, setConnectingId]   = useState<string | null>(null);
-  const [connectError, setConnectError]   = useState<string | null>(null);
-  const [bleOff, setBleOff]               = useState(false);
-  const [readingInProgress, setReadingInProgress] = useState(false);
-  const [readingProgress, setReadingProgress]     = useState(0);
-  const [readingResult, setReadingResult]         = useState<any>(null);
-  const [readingError, setReadingError]           = useState<string | null>(null);
-
-  const progressWidthRef  = useRef(new Animated.Value(0)).current;
-  const animationRef      = useRef<ReturnType<typeof setInterval> | null>(null);
-  const progressRef       = useRef(0);
-  const hasAutoScanned    = useRef(false);
-  const scanActiveRef     = useRef(false);
-
-  // Animate progress bar
   useEffect(() => {
-    Animated.timing(progressWidthRef, {
-      toValue: readingProgress,
-      duration: 200,
-      useNativeDriver: false,
-    }).start();
-  }, [readingProgress, progressWidthRef]);
-
-  // Clear error when connected
-  useEffect(() => {
-    if (isConnected) setConnectError(null);
-  }, [isConnected]);
-
-  // ─── BLE state + scan results listener ───────────────────────────────────
-  useEffect(() => {
-    const unsub = breathalyser.on((event) => {
-      if (event.type === "ble_state") {
-        setBleOff(event.state === State.PoweredOff);
-      }
-      if (event.type === "scan_result" && !isConnected) {
-        const incoming = event.devices[0];
-        if (!incoming) return;
-        setDevices(prev => {
-          if (prev.find(d => d.id === incoming.id)) return prev;
-          return [...prev, incoming];
-        });
-      }
-    });
-    return unsub;
-  }, [isConnected, setDevices]);
-
-  // ─── Permission helper ────────────────────────────────────────────────────
-  const requestBluetoothPermission = useCallback(async (): Promise<boolean> => {
-    if (Platform.OS !== "android") return true;
-    try {
-      if (Platform.Version >= 31) {
-        const granted = await PermissionsAndroid.requestMultiple([
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-        ]);
-        return (
-          granted["android.permission.BLUETOOTH_SCAN"]    === PermissionsAndroid.RESULTS.GRANTED &&
-          granted["android.permission.BLUETOOTH_CONNECT"] === PermissionsAndroid.RESULTS.GRANTED
-        );
-      } else {
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
-        );
-        return granted === PermissionsAndroid.RESULTS.GRANTED;
-      }
-    } catch (_) {
-      return false;
-    }
+    Animated.parallel([
+      Animated.spring(scale, { toValue: 1, useNativeDriver: true, tension: 60, friction: 8 }),
+      Animated.timing(opacity, { toValue: 1, duration: 350, useNativeDriver: true }),
+    ]).start();
   }, []);
 
-  // ─── Start scan ───────────────────────────────────────────────────────────
-  const startScan = useCallback(async () => {
-    if (scanActiveRef.current || isConnected) return;
-    const allowed = await requestBluetoothPermission();
-    if (!allowed) {
-      setConnectError("Bluetooth permission required");
-      return;
-    }
-    scanActiveRef.current = true;
-    setDevices([]);
-    setScanning(true);
-    breathalyser.scan();
-  }, [isConnected, requestBluetoothPermission, setDevices]);
+  const pass = !result.overLimit;
+  const accentColor = pass ? "#1DB954" : "#FF4C4C";
+  const bacPercent = (result.bac * 100).toFixed(2);
+  const bacMg = (result.bac * 1000).toFixed(0);
 
-  // ─── Auto-scan once on mount if not connected ─────────────────────────────
-  useEffect(() => {
-    if (!hasAutoScanned.current) {
-      hasAutoScanned.current = true;
-      // Try auto-reconnect first; if no saved device, fall through to scan
-      autoConnectOnMount().catch(() => {
-        if (!isConnected) startScan();
-      });
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ─── Stop scan once connected ─────────────────────────────────────────────
-  useEffect(() => {
-    if (isConnected && scanActiveRef.current) {
-      scanActiveRef.current = false;
-      breathalyser.stopScan();
-      setScanning(false);
-    }
-  }, [isConnected]);
-
-  // ─── Connection watchdog ──────────────────────────────────────────────────
-  useEffect(() => {
-    if (!isConnected) return;
-    const interval = setInterval(async () => {
-      const ok = await breathalyser.isStillConnected();
-      if (!ok) breathalyser.emit({ type: "status", status: "disconnected" });
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [isConnected]);
-
-  // ─── Connect to a device ──────────────────────────────────────────────────
-  const handleConnect = useCallback(async (device: ScannedDevice) => {
-    if (connectingId || isConnected) return;
-    setConnectingId(device.id);
-    setConnectError(null);
-    try {
-      await breathalyser.connect(device);
-      setConnectingId(null);
-    } catch (err: any) {
-      setConnectingId(null);
-      // Only show timeout to the user; swallow BLE internal errors
-      if (err?.message === "Connection timed out") {
-        setConnectError("Connection timed out. Move closer and retry.");
-      }
-    }
-  }, [connectingId, isConnected]);
-
-  // ─── Manual scan button ───────────────────────────────────────────────────
-  const handleManualScan = useCallback(async () => {
-    scanActiveRef.current = false; // reset so startScan can proceed
-    await startScan();
-  }, [startScan]);
-
-  // ─── Reading ──────────────────────────────────────────────────────────────
-  const startReading = useCallback(async () => {
-    if (!isConnected || deviceStatus !== "ready" || readingInProgress) return;
-    setReadingInProgress(true);
-    setReadingProgress(0);
-    setReadingError(null);
-    progressRef.current = 0;
-
-    animationRef.current = setInterval(() => {
-      progressRef.current = Math.min(progressRef.current + 0.15, 96);
-      setReadingProgress(progressRef.current);
-      if (progressRef.current >= 96) clearInterval(animationRef.current!);
-    }, 20);
-
-    try {
-      const { bac, timestamp } = await getReading();
-      setReadingProgress(100);
-      const bacPercent = bac / 10;
-      setReadingResult({
-        bacPercent: `${bacPercent.toFixed(2)}%`,
-        bacMg: `${bac.toFixed(2)} mg/L`,
-        overLimit: bacPercent >= 0.05,
-        timestamp,
-      });
-    } catch (err: any) {
-      // Only show timeout error
-      if (err?.message?.includes("timed out")) {
-        setReadingError("Reading timed out. Please try again.");
-      }
-    } finally {
-      if (animationRef.current) clearInterval(animationRef.current);
-      setReadingInProgress(false);
-    }
-  }, [isConnected, deviceStatus, readingInProgress]);
-
-  const clearReadingResult = useCallback(() => {
-    setReadingResult(null);
-    setReadingProgress(0);
-    setReadingError(null);
-  }, []);
-
-  // ─── UI helpers ───────────────────────────────────────────────────────────
-  const actionText = (() => {
-    if (deviceStatus === "warmup") return countdownSeconds > 0 ? `WARMING UP... ${countdownSeconds}s` : "Warming up…";
-    if (readingInProgress) return `${Math.round(readingProgress)}%`;
-    return "GET READING";
-  })();
-
-  const isActionDisabled = !isConnected || deviceStatus !== "ready" || readingInProgress;
-
-  const buttonStyle =
-    readingInProgress                                ? styles.btnActive
-    : deviceStatus === "warmup" || deviceStatus === "recalibrating" ? styles.btnWarmup
-    : styles.btnReady;
-
-  const statusHeaderText = (() => {
-    if (deviceStatus === "warmup") return countdownSeconds > 0 ? `Warming up… ${countdownSeconds}s` : "Warming up…";
-    if (readingInProgress) return `Reading… ${Math.round(readingProgress)}%`;
-    if (readingResult) return `Done • ${readingResult.bacPercent}`;
-    if (deviceStatus === "ready") return "Ready to scan";
-    return "Connected";
-  })();
-
-  const widthInterpolated = progressWidthRef.interpolate({
-    inputRange: [0, 100],
-    outputRange: ["0%", "100%"],
-  });
-
-  const ledStatus = deviceStatus === "ready" && readingInProgress ? "scanning" : deviceStatus;
-
-  // ─── Render ───────────────────────────────────────────────────────────────
   return (
-    <SafeAreaView style={styles.root} edges={["top"]}>
-      {!!connectMsg  && <FadingErrorBanner message={connectMsg} />}
-      {!!connectError && <FadingErrorBanner message={connectError} />}
-      {!!readingError && <FadingErrorBanner message={readingError} />}
+    <Animated.View style={[styles.resultCard, { opacity, transform: [{ scale }], borderColor: accentColor }]}>
+      <View style={[styles.resultBadge, { backgroundColor: pass ? "rgba(29,185,84,0.12)" : "rgba(255,76,76,0.12)" }]}>
+        <Text style={[styles.resultVerdict, { color: accentColor }]}>
+          {pass ? "✓  PASS" : "✗  OVER LIMIT"}
+        </Text>
+      </View>
 
-      {/* Top bar */}
-      <View style={styles.topBar}>
-        <Text style={styles.title}>Breathalyser</Text>
-        <View style={[styles.pill, isConnected ? styles.pillOn : styles.pillOff]}>
-          {isConnected
-            ? <Text style={styles.checkmark}>✓</Text>
-            : <View style={[styles.pillDot, styles.dotGrey]} />
-          }
-          <Text style={[styles.pillText, isConnected && { color: "#1DB954" }]}>
-            {isConnected ? "Connected" : scanning ? "Scanning…" : "Offline"}
+      <Text style={[styles.resultBac, { color: accentColor }]}>{bacPercent}%</Text>
+      <Text style={styles.resultBacMg}>{bacMg} mg/100ml</Text>
+
+      <View style={styles.resultMeta}>
+        <View style={styles.resultMetaItem}>
+          <Text style={styles.resultMetaLabel}>Legal limit</Text>
+          <Text style={styles.resultMetaValue}>0.08%</Text>
+        </View>
+        <View style={styles.resultMetaDivider} />
+        <View style={styles.resultMetaItem}>
+          <Text style={styles.resultMetaLabel}>Tested at</Text>
+          <Text style={styles.resultMetaValue}>
+            {new Date(result.timestamp).toLocaleTimeString("en-GB", {
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+            })}
           </Text>
         </View>
       </View>
 
+      <TouchableOpacity style={styles.clearBtn} onPress={onClear} activeOpacity={0.7}>
+        <Text style={styles.clearBtnText}>NEW TEST</Text>
+      </TouchableOpacity>
+    </Animated.View>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main Screen
+// ─────────────────────────────────────────────────────────────────────────────
+
+export default function BreathalyserScreen() {
+  const { devices, setDevices } = useBreathalyser();
+  const { autoConnectOnMount, handleManualDisconnect } = usePersistentBLE();
+
+  // Core state
+  const [phase, setPhase] = useState<ScreenPhase>("disconnected");
+  const [warmupRemaining, setWarmupRemaining] = useState(30);
+  const [foundDevices, setFoundDevices] = useState<ScannedDevice[]>([]);
+  const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [result, setResult] = useState<BacResult | null>(null);
+  const [history, setHistory] = useState<BacResult[]>([]);
+
+  // Toast
+  const [toast, setToast] = useState<string | null>(null);
+  const toastKey = useRef(0);
+
+  // BLE state
+  const [bleOff, setBleOff] = useState(false);
+
+  // Scan state
+  const scanActiveRef = useRef(false);
+  const hasAutoAttemptedRef = useRef(false);
+
+  // Reading progress animation
+  const scanProgress = useRef(new Animated.Value(0)).current;
+  const scanAnim = useRef<Animated.CompositeAnimation | null>(null);
+
+  // ─── Toast helper ───────────────────────────────────────────────────────────
+
+  const showToast = useCallback((msg: string) => {
+    toastKey.current += 1;
+    setToast(msg);
+  }, []);
+
+  // ─── BLE event listener ─────────────────────────────────────────────────────
+
+  useEffect(() => {
+    const unsub = breathalyser.on((event) => {
+      // BLE adapter state
+      if (event.type === "ble_state") {
+        setBleOff(event.state === State.PoweredOff);
+        return;
+      }
+
+      // Device scan results
+      if (event.type === "scan_result") {
+        const incoming = event.devices[0];
+        if (!incoming) return;
+        setFoundDevices((prev) => {
+          if (prev.find((d) => d.id === incoming.id)) return prev;
+          return [...prev, incoming];
+        });
+        return;
+      }
+
+      // Connection status
+      if (event.type === "status") {
+        if (event.status === "connected") {
+          scanActiveRef.current = false;
+          setPhase("warmup");
+          setWarmupRemaining(30);
+          showToast("Device connected");
+          return;
+        }
+        if (event.status === "disconnected") {
+          stopScanAnim();
+          setPhase("disconnected");
+          setResult(null);
+          setConnectingId(null);
+          setFoundDevices([]);
+          showToast("Device disconnected");
+          return;
+        }
+        return;
+      }
+
+      // Data from Arduino
+      if (event.type === "reading") {
+        handleArduinoMessage(event.value.trim());
+      }
+    });
+
+    return unsub;
+  }, []);
+
+  // ─── Arduino message handler ────────────────────────────────────────────────
+
+  const handleArduinoMessage = useCallback((msg: string) => {
+    if (!msg) return;
+
+    // WARMUP countdown
+    if (msg.startsWith("STATUS:WARMUP:")) {
+      const seconds = parseInt(msg.slice(14), 10);
+      if (!isNaN(seconds)) {
+        setWarmupRemaining(seconds);
+        setPhase("warmup");
+      }
+      return;
+    }
+
+    // Device ready
+    if (msg === "STATUS:READY") {
+      setPhase("ready");
+      setWarmupRemaining(0);
+      return;
+    }
+
+    // Scan in progress (Arduino acknowledged SCAN command)
+    if (msg === "STATUS:SCANNING") {
+      setPhase("scanning_bac");
+      startScanAnim();
+      return;
+    }
+
+    // BAC result
+    if (msg.startsWith("BAC:")) {
+      stopScanAnim();
+      const raw = msg.slice(4);
+      const bac = parseFloat(raw);
+      if (isNaN(bac) || bac < 0) {
+        showToast("Device returned an invalid reading. Please try again.");
+        setPhase("ready");
+        return;
+      }
+      const newResult: BacResult = {
+        bac,
+        overLimit: bac >= BAC_LEGAL_LIMIT,
+        timestamp: Date.now(),
+      };
+      setResult(newResult);
+      setHistory((prev) => [newResult, ...prev.slice(0, 19)]);
+      setPhase("result");
+      return;
+    }
+  }, []);
+
+  // ─── Scan animation ─────────────────────────────────────────────────────────
+
+  const startScanAnim = useCallback(() => {
+    scanProgress.setValue(0);
+    // Run from 0 → 95% over 20s (matches Arduino scan duration)
+    // The final 5% fills when the BAC result arrives
+    scanAnim.current = Animated.timing(scanProgress, {
+      toValue: 0.95,
+      duration: 20_000,
+      useNativeDriver: false,
+    });
+    scanAnim.current.start();
+  }, []);
+
+  const stopScanAnim = useCallback(() => {
+    scanAnim.current?.stop();
+    scanAnim.current = null;
+    Animated.timing(scanProgress, {
+      toValue: 1,
+      duration: 300,
+      useNativeDriver: false,
+    }).start(() => {
+      setTimeout(() => scanProgress.setValue(0), 800);
+    });
+  }, []);
+
+  // ─── Permissions ────────────────────────────────────────────────────────────
+
+  const requestPermissions = useCallback(async (): Promise<boolean> => {
+    if (Platform.OS !== "android") return true;
+    try {
+      if (Platform.Version >= 31) {
+        const result = await PermissionsAndroid.requestMultiple([
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+        ]);
+        return (
+          result["android.permission.BLUETOOTH_SCAN"] === PermissionsAndroid.RESULTS.GRANTED &&
+          result["android.permission.BLUETOOTH_CONNECT"] === PermissionsAndroid.RESULTS.GRANTED
+        );
+      } else {
+        const result = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
+        );
+        return result === PermissionsAndroid.RESULTS.GRANTED;
+      }
+    } catch {
+      return false;
+    }
+  }, []);
+
+  // ─── Device scan ─────────────────────────────────────────────────────────────
+
+  const startDeviceScan = useCallback(async () => {
+    if (scanActiveRef.current) return;
+    const allowed = await requestPermissions();
+    if (!allowed) {
+      showToast("Bluetooth permission is required to scan.");
+      return;
+    }
+    scanActiveRef.current = true;
+    setFoundDevices([]);
+    setPhase("scanning_devices");
+    breathalyser.scan();
+
+    // Auto-stop scan UI after 10s (breathalyser.ts handles BLE timeout)
+    setTimeout(() => {
+      if (scanActiveRef.current) {
+        scanActiveRef.current = false;
+        setPhase((prev) => (prev === "scanning_devices" ? "disconnected" : prev));
+      }
+    }, 10_000);
+  }, [requestPermissions, showToast]);
+
+  // ─── Auto-connect on mount ───────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (hasAutoAttemptedRef.current) return;
+    hasAutoAttemptedRef.current = true;
+
+    autoConnectOnMount().catch(() => {
+      // No saved device or connect failed — start scanning automatically
+      startDeviceScan();
+    });
+  }, []);
+
+  // ─── Connect to a device ──────────────────────────────────────────────────────
+
+  const handleConnect = useCallback(
+    async (device: ScannedDevice) => {
+      if (connectingId) return;
+      setConnectingId(device.id);
+      try {
+        await breathalyser.connect(device);
+        // phase transition handled in BLE listener on "connected" status
+      } catch (err: any) {
+        setConnectingId(null);
+        if (err?.message === "Connection timed out") {
+          showToast("Connection timed out. Move closer to the device and try again.");
+        }
+        // Other BLE internal errors are swallowed — they don't surface useful info to users
+      }
+    },
+    [connectingId, showToast]
+  );
+
+  // ─── Trigger reading ─────────────────────────────────────────────────────────
+
+  const handleStartReading = useCallback(async () => {
+    if (phase !== "ready") return;
+
+    try {
+      // getReading handles sending SCAN, waiting for STATUS:SCANNING, then BAC
+      // Phase transitions are driven by the BLE event listener above (real-time)
+      // so we only need to handle the error case here
+      await getReading();
+      // Success: phase is already set to "result" by the BLE listener
+    } catch (err) {
+      stopScanAnim();
+      setPhase("ready");
+
+      if (err instanceof ReadingError) {
+        switch (err.code) {
+          case "DEVICE_NOT_CONNECTED":
+            showToast("Device disconnected. Please reconnect.");
+            setPhase("disconnected");
+            break;
+          case "COMMAND_NOT_ACKNOWLEDGED":
+            showToast("Device did not respond. Ensure it is ready and try again.");
+            break;
+          case "READING_TIMEOUT":
+            showToast("Reading timed out. Please try again.");
+            break;
+          case "INVALID_BAC_FORMAT":
+            showToast("Received an invalid reading. Please try again.");
+            break;
+          case "COMMAND_SEND_FAILED":
+            showToast("Could not reach the device. Try reconnecting.");
+            break;
+          default:
+            showToast("An unexpected error occurred. Please try again.");
+        }
+      } else {
+        showToast("An unexpected error occurred. Please try again.");
+      }
+    }
+  }, [phase, stopScanAnim, showToast]);
+
+  // ─── Disconnect ──────────────────────────────────────────────────────────────
+
+  const handleDisconnect = useCallback(async () => {
+    stopScanAnim();
+    await handleManualDisconnect();
+  }, [handleManualDisconnect, stopScanAnim]);
+
+  // ─── Clear result ────────────────────────────────────────────────────────────
+
+  const handleClearResult = useCallback(() => {
+    setResult(null);
+    setPhase("ready");
+  }, []);
+
+  // ─── Derived UI values ───────────────────────────────────────────────────────
+
+  const isConnected = !["disconnected", "scanning_devices", "connecting"].includes(phase);
+
+  const dotColor = (() => {
+    if (phase === "warmup") return "#FFA500";
+    if (phase === "ready" || phase === "result") return "#1DB954";
+    if (phase === "scanning_bac") return "#3B8BEB";
+    return "#555";
+  })();
+
+  const dotPulse = phase === "warmup" || phase === "scanning_bac";
+
+  const statusLabel = (() => {
+    if (phase === "warmup") return `Warming up • ${warmupRemaining}s`;
+    if (phase === "ready") return "Ready to test";
+    if (phase === "scanning_bac") return "Analysing breath…";
+    if (phase === "result") return result?.overLimit ? "Over legal limit" : "Within legal limit";
+    return "";
+  })();
+
+  const barWidth = scanProgress.interpolate({
+    inputRange: [0, 1],
+    outputRange: ["0%", "100%"],
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Render
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  return (
+    <SafeAreaView style={styles.root} edges={["top"]}>
+      {/* Toast */}
+      {toast && <ToastBanner key={toastKey.current} message={toast} />}
+
+      {/* Top bar */}
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>Breathalyser</Text>
+        {isConnected && (
+          <View style={styles.headerStatus}>
+            <PulseDot color={dotColor} pulse={dotPulse} />
+            <Text style={[styles.headerStatusText, { color: dotColor }]}>{statusLabel}</Text>
+          </View>
+        )}
+      </View>
+
+      {/* Bluetooth off banner */}
       {bleOff && (
-        <View style={styles.btBanner}>
-          <Text style={styles.btBannerText}>Bluetooth is off</Text>
-          <TouchableOpacity onPress={() => Linking.openSettings()}>
-            <Text style={styles.btBannerBtnText}>OPEN SETTINGS</Text>
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity style={styles.btOffBanner} onPress={() => Linking.openSettings()}>
+          <Text style={styles.btOffText}>⚠  Bluetooth is off</Text>
+          <Text style={styles.btOffAction}>Open Settings</Text>
+        </TouchableOpacity>
       )}
 
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-
-        {isConnected ? (
-          <View style={styles.connectedCard}>
-            <View style={styles.statusHeader}>
-              <StatusLed status={ledStatus} />
-              <Text style={styles.statusText}>{statusHeaderText}</Text>
-            </View>
-
-            <View style={styles.actionRow}>
-              <TouchableOpacity
-                style={[styles.actionBtn, buttonStyle]}
-                onPress={startReading}
-                disabled={isActionDisabled}
-              >
-                {readingInProgress || deviceStatus === "warmup" ? (
-                  <>
-                    <View style={styles.progressTrack} />
-                    <Animated.View style={[styles.progressFill, { width: widthInterpolated }]} />
-                    <Text style={styles.progressText}>{actionText}</Text>
-                  </>
-                ) : (
-                  <Text style={styles.btnText}>{actionText}</Text>
-                )}
-              </TouchableOpacity>
-
-              <TouchableOpacity style={styles.disconnectBtn} onPress={handleManualDisconnect}>
-                <Text style={styles.disconnectText}>DISCONNECT</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        ) : (
-          <View style={styles.scanSection}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* ── DISCONNECTED ──────────────────────────────────────────────────── */}
+        {(phase === "disconnected" || phase === "scanning_devices" || phase === "connecting") && (
+          <View style={styles.section}>
             <TouchableOpacity
-              style={[styles.scanBtn, scanning && styles.scanBtnDisabled]}
-              onPress={handleManualScan}
-              disabled={scanning}
+              style={[styles.scanButton, phase === "scanning_devices" && styles.scanButtonBusy]}
+              onPress={startDeviceScan}
+              disabled={phase === "scanning_devices"}
+              activeOpacity={0.8}
             >
-              {scanning
-                ? <ActivityIndicator color="#000" size="small" />
-                : <Text style={styles.scanBtnText}>SCAN FOR DEVICES</Text>
-              }
+              {phase === "scanning_devices" ? (
+                <>
+                  <ActivityIndicator color="#000" size="small" style={{ marginRight: 8 }} />
+                  <Text style={styles.scanButtonText}>Scanning…</Text>
+                </>
+              ) : (
+                <Text style={styles.scanButtonText}>SCAN FOR DEVICES</Text>
+              )}
             </TouchableOpacity>
 
-            {scanning && (
-              <Text style={styles.autoScanIndicator}>🔍 Searching for BlowSafe devices…</Text>
+            {phase === "scanning_devices" && (
+              <Text style={styles.scanHint}>Looking for BlowSafe devices nearby…</Text>
             )}
 
-            {devices.length > 0 && (
+            {foundDevices.length > 0 && (
               <View style={styles.deviceList}>
-                <Text style={styles.sectionLabel}>DEVICES FOUND</Text>
-                {devices.map(d => (
-                  <DeviceRow
+                <Text style={styles.sectionLabel}>FOUND DEVICES</Text>
+                {foundDevices.map((d) => (
+                  <DeviceCard
                     key={d.id}
                     device={d}
-                    connectingId={connectingId}
+                    connecting={connectingId === d.id}
                     onConnect={() => handleConnect(d)}
                   />
                 ))}
@@ -435,145 +637,552 @@ export default function BreathalyserScreen() {
           </View>
         )}
 
-        {readingResult && <BACCard result={readingResult} onClear={clearReadingResult} />}
+        {/* ── WARMUP ───────────────────────────────────────────────────────── */}
+        {phase === "warmup" && (
+          <View style={styles.section}>
+            <WarmupRing remaining={warmupRemaining} />
+            <TouchableOpacity style={styles.disconnectBtn} onPress={handleDisconnect} activeOpacity={0.7}>
+              <Text style={styles.disconnectBtnText}>DISCONNECT</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
-        {history?.length > 0 && !readingResult && (
+        {/* ── READY ────────────────────────────────────────────────────────── */}
+        {phase === "ready" && (
+          <View style={styles.section}>
+            <View style={styles.readyCard}>
+              <View style={styles.readyIconWrap}>
+                <Text style={styles.readyIcon}>◉</Text>
+              </View>
+              <Text style={styles.readyTitle}>Device Ready</Text>
+              <Text style={styles.readySub}>Press the button below and blow into the device when prompted.</Text>
+
+              <TouchableOpacity
+                style={styles.readyBtn}
+                onPress={handleStartReading}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.readyBtnText}>START TEST</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity style={styles.disconnectBtn} onPress={handleDisconnect} activeOpacity={0.7}>
+              <Text style={styles.disconnectBtnText}>DISCONNECT</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* ── SCANNING BAC ─────────────────────────────────────────────────── */}
+        {phase === "scanning_bac" && (
+          <View style={styles.section}>
+            <View style={styles.scanningCard}>
+              <Text style={styles.scanningTitle}>Analysing…</Text>
+              <Text style={styles.scanningSub}>Keep blowing steadily into the device.</Text>
+
+              <View style={styles.progressTrack}>
+                <Animated.View style={[styles.progressFill, { width: barWidth }]} />
+              </View>
+
+              <Text style={styles.scanningNote}>This takes approximately 20 seconds.</Text>
+            </View>
+          </View>
+        )}
+
+        {/* ── RESULT ───────────────────────────────────────────────────────── */}
+        {phase === "result" && result && (
+          <View style={styles.section}>
+            <BacResultCard result={result} onClear={handleClearResult} />
+            <TouchableOpacity style={styles.disconnectBtn} onPress={handleDisconnect} activeOpacity={0.7}>
+              <Text style={styles.disconnectBtnText}>DISCONNECT</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* ── HISTORY ──────────────────────────────────────────────────────── */}
+        {history.length > 0 && phase !== "result" && (
           <View style={styles.historySection}>
-            <Text style={styles.sectionLabel}>RECENT READINGS</Text>
-            {history.slice(0, 5).map((item, i) => (
+            <Text style={styles.sectionLabel}>RECENT TESTS</Text>
+            {history.slice(0, 8).map((item, i) => (
               <View key={i} style={styles.historyRow}>
+                <View style={[styles.historyDot, { backgroundColor: item.overLimit ? "#FF4C4C" : "#1DB954" }]} />
                 <Text style={[styles.historyBac, { color: item.overLimit ? "#FF4C4C" : "#1DB954" }]}>
-                  {item.bacPercent}
+                  {(item.bac * 100).toFixed(2)}%
                 </Text>
                 <Text style={styles.historyTime}>
-                  {new Date(item.timestamp).toLocaleTimeString()}
+                  {new Date(item.timestamp).toLocaleTimeString("en-GB", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </Text>
+                <Text style={[styles.historyVerdict, { color: item.overLimit ? "#FF4C4C" : "#1DB954" }]}>
+                  {item.overLimit ? "OVER" : "PASS"}
                 </Text>
               </View>
             ))}
           </View>
         )}
 
+        <Text style={styles.legalNote}>
+          Zimbabwe limit: 0.08% BAC (80 mg/100ml) · Road Traffic Act
+        </Text>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-// ─── Styles ──────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Styles
+// ─────────────────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#121212" },
-
-  errorBanner: {
-    position: "absolute", top: 10, left: 16, right: 16, zIndex: 20, elevation: 10,
-    backgroundColor: "rgba(255,76,76,0.93)", borderRadius: 10, padding: 12,
+  root: {
+    flex: 1,
+    backgroundColor: "#0c0c0c",
   },
-  errorBannerText: { color: "#fff", textAlign: "center", fontWeight: "600", fontSize: 13 },
 
-  topBar: {
-    flexDirection: "row", justifyContent: "space-between", alignItems: "center",
-    paddingHorizontal: 14, paddingVertical: 10,
-    borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.05)",
+  // ── Toast ─────────────────────────────────────────────────────────────────
+  toast: {
+    position: "absolute",
+    top: 56,
+    left: 16,
+    right: 16,
+    zIndex: 100,
+    elevation: 12,
+    backgroundColor: "rgba(30,30,30,0.96)",
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
   },
-  title: { color: "#1DB954", fontSize: 16, fontWeight: "800" },
-
-  pill: {
-    flexDirection: "row", alignItems: "center", gap: 5,
-    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, borderWidth: 1,
+  toastText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "500",
+    textAlign: "center",
+    lineHeight: 18,
   },
-  pillOn:  { borderColor: "rgba(29,185,84,0.3)", backgroundColor: "rgba(29,185,84,0.08)" },
-  pillOff: { borderColor: "rgba(255,255,255,0.08)", backgroundColor: "rgba(255,255,255,0.03)" },
-  pillDot: { width: 6, height: 6, borderRadius: 3 },
-  dotGrey: { backgroundColor: "#444" },
-  checkmark: { color: "#1DB954", fontSize: 12, fontWeight: "bold" },
-  pillText: { fontSize: 10, fontWeight: "600", color: "#888" },
 
-  btBanner: {
-    flexDirection: "row", justifyContent: "space-between", padding: 10,
+  // ── Header ────────────────────────────────────────────────────────────────
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.05)",
+  },
+  headerTitle: {
+    color: "#1DB954",
+    fontSize: 17,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+  },
+  headerStatus: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+  },
+  headerStatusText: {
+    fontSize: 11,
+    fontWeight: "600",
+  },
+
+  // ── Status dot ────────────────────────────────────────────────────────────
+  dot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+
+  // ── BT off banner ─────────────────────────────────────────────────────────
+  btOffBanner: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 18,
+    paddingVertical: 10,
     backgroundColor: "rgba(255,76,76,0.08)",
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,76,76,0.15)",
   },
-  btBannerText: { color: "#aaa", fontWeight: "600" },
-  btBannerBtnText: { color: "#FF4C4C", fontWeight: "800" },
-
-  content: { padding: 16, paddingBottom: 48 },
-
-  connectedCard: {
-    backgroundColor: "#1a1a1a", borderRadius: 14, padding: 16,
-    borderWidth: 1, borderColor: "rgba(255,255,255,0.05)", gap: 14, marginBottom: 16,
+  btOffText: {
+    color: "#aaa",
+    fontSize: 13,
   },
-  statusHeader: { flexDirection: "row", alignItems: "center", gap: 10 },
-  statusText: { color: "#fff", fontSize: 14, fontWeight: "700" },
-  led: { width: 12, height: 12, borderRadius: 6 },
-
-  actionRow: { flexDirection: "row", gap: 10 },
-  actionBtn: {
-    flex: 1.5, height: 50, borderRadius: 25, overflow: "hidden",
-    justifyContent: "center", alignItems: "center",
+  btOffAction: {
+    color: "#FF4C4C",
+    fontSize: 12,
+    fontWeight: "700",
   },
-  btnWarmup: { backgroundColor: "#FFA500" },
-  btnReady:  { backgroundColor: "#1DB954" },
-  btnActive: { backgroundColor: "#1e90ff" },
-  btnText: { color: "#000", fontWeight: "800", fontSize: 14 },
 
+  // ── Scroll ────────────────────────────────────────────────────────────────
+  scroll: {
+    flex: 1,
+  },
+  scrollContent: {
+    padding: 16,
+    paddingBottom: 100,
+  },
+
+  // ── Section wrapper ───────────────────────────────────────────────────────
+  section: {
+    gap: 12,
+    marginBottom: 8,
+  },
+
+  // ── Scan button ───────────────────────────────────────────────────────────
+  scanButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: "#1DB954",
+  },
+  scanButtonBusy: {
+    backgroundColor: "#1a5e35",
+  },
+  scanButtonText: {
+    color: "#000",
+    fontSize: 13,
+    fontWeight: "800",
+    letterSpacing: 1,
+  },
+  scanHint: {
+    color: "#555",
+    fontSize: 12,
+    textAlign: "center",
+    fontStyle: "italic",
+  },
+
+  // ── Device list ───────────────────────────────────────────────────────────
+  deviceList: {
+    gap: 8,
+    marginTop: 4,
+  },
+  sectionLabel: {
+    color: "#444",
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 1.5,
+    marginBottom: 4,
+  },
+  deviceCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#161616",
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+  },
+  deviceInfo: {
+    flex: 1,
+  },
+  deviceName: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  deviceId: {
+    color: "#444",
+    fontSize: 10,
+    marginTop: 3,
+  },
+  connectBtn: {
+    backgroundColor: "#1DB954",
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderRadius: 20,
+    minWidth: 88,
+    alignItems: "center",
+  },
+  connectBtnBusy: {
+    backgroundColor: "#1a5e35",
+  },
+  connectBtnText: {
+    color: "#000",
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+  },
+
+  // ── Warmup ring ───────────────────────────────────────────────────────────
+  ringContainer: {
+    alignItems: "center",
+    paddingVertical: 32,
+    gap: 16,
+    backgroundColor: "#161616",
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.05)",
+  },
+  ringSvgWrap: {
+    width: 120,
+    height: 120,
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+  },
+  ringTrack: {
+    position: "absolute",
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    borderWidth: 6,
+  },
+  ringProgress: {
+    position: "absolute",
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    borderWidth: 6,
+    borderColor: "#1DB954",
+    borderLeftColor: "transparent",
+    borderBottomColor: "transparent",
+  },
+  ringCenter: {
+    alignItems: "center",
+  },
+  ringNumber: {
+    color: "#fff",
+    fontSize: 32,
+    fontWeight: "800",
+  },
+  ringLabel: {
+    color: "#555",
+    fontSize: 10,
+    fontWeight: "600",
+    letterSpacing: 0.5,
+  },
+  warmupTitle: {
+    color: "#fff",
+    fontSize: 18,
+    fontWeight: "700",
+  },
+  warmupSub: {
+    color: "#555",
+    fontSize: 12,
+    textAlign: "center",
+    paddingHorizontal: 24,
+    lineHeight: 18,
+  },
+
+  // ── Ready card ────────────────────────────────────────────────────────────
+  readyCard: {
+    alignItems: "center",
+    backgroundColor: "#161616",
+    borderRadius: 20,
+    padding: 32,
+    borderWidth: 1,
+    borderColor: "rgba(29,185,84,0.15)",
+    gap: 12,
+  },
+  readyIconWrap: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: "rgba(29,185,84,0.1)",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(29,185,84,0.3)",
+  },
+  readyIcon: {
+    fontSize: 28,
+    color: "#1DB954",
+  },
+  readyTitle: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: "700",
+  },
+  readySub: {
+    color: "#555",
+    fontSize: 13,
+    textAlign: "center",
+    lineHeight: 19,
+    paddingHorizontal: 8,
+  },
+  readyBtn: {
+    marginTop: 8,
+    backgroundColor: "#1DB954",
+    paddingHorizontal: 40,
+    paddingVertical: 15,
+    borderRadius: 28,
+  },
+  readyBtnText: {
+    color: "#000",
+    fontSize: 14,
+    fontWeight: "800",
+    letterSpacing: 1,
+  },
+
+  // ── Scanning BAC card ─────────────────────────────────────────────────────
+  scanningCard: {
+    alignItems: "center",
+    backgroundColor: "#161616",
+    borderRadius: 20,
+    padding: 32,
+    borderWidth: 1,
+    borderColor: "rgba(59,139,235,0.2)",
+    gap: 16,
+  },
+  scanningTitle: {
+    color: "#fff",
+    fontSize: 22,
+    fontWeight: "700",
+  },
+  scanningSub: {
+    color: "#888",
+    fontSize: 13,
+    textAlign: "center",
+  },
   progressTrack: {
-    position: "absolute", inset: 0,
-    backgroundColor: "rgba(0,0,0,0.15)",
+    width: "100%",
+    height: 6,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderRadius: 3,
+    overflow: "hidden",
   },
   progressFill: {
-    position: "absolute", left: 0, top: 0, bottom: 0,
-    backgroundColor: "rgba(255,255,255,0.3)",
+    height: "100%",
+    backgroundColor: "#3B8BEB",
+    borderRadius: 3,
   },
-  progressText: { color: "#fff", fontWeight: "800", fontSize: 15, zIndex: 2 },
-
-  disconnectBtn: {
-    flex: 1, backgroundColor: "#2a2a2a", height: 50, borderRadius: 25,
-    justifyContent: "center", alignItems: "center",
+  scanningNote: {
+    color: "#444",
+    fontSize: 11,
   },
-  disconnectText: { color: "#fff", fontWeight: "700", fontSize: 13 },
 
-  scanSection: { gap: 14 },
-  scanBtn: {
-    backgroundColor: "#1DB954", height: 50, borderRadius: 25,
-    alignItems: "center", justifyContent: "center",
-  },
-  scanBtnDisabled: { opacity: 0.55 },
-  scanBtnText: { color: "#000", fontWeight: "800", fontSize: 14 },
-  autoScanIndicator: { color: "#555", fontSize: 12, textAlign: "center", fontStyle: "italic" },
-
-  deviceList: { gap: 8 },
-  sectionLabel: { color: "#555", fontSize: 10, fontWeight: "700", letterSpacing: 1, marginBottom: 4 },
-
-  deviceRow: {
-    flexDirection: "row", justifyContent: "space-between", alignItems: "center",
-    backgroundColor: "#111", borderRadius: 10, padding: 14,
-    borderWidth: 1, borderColor: "#1e1e1e",
-  },
-  deviceRowLeft: { flex: 1 },
-  deviceName: { color: "#fff", fontWeight: "600", fontSize: 14 },
-  deviceId: { color: "#444", fontSize: 10, marginTop: 3 },
-
-  btnConnect: {
-    backgroundColor: "#1DB954", paddingHorizontal: 14, paddingVertical: 9,
-    borderRadius: 20, minWidth: 80, alignItems: "center",
-  },
-  btnLoading: { backgroundColor: "#333" },
-  btnConnectText: { color: "#000", fontWeight: "800", fontSize: 12 },
-
+  // ── Result card ───────────────────────────────────────────────────────────
   resultCard: {
-    padding: 24, alignItems: "center", borderRadius: 14,
-    borderWidth: 1, marginBottom: 16,
+    alignItems: "center",
+    backgroundColor: "#161616",
+    borderRadius: 20,
+    padding: 32,
+    borderWidth: 1,
+    gap: 16,
   },
-  resultFail: { backgroundColor: "rgba(255,76,76,0.08)", borderColor: "#FF4C4C" },
-  resultPass: { backgroundColor: "rgba(29,185,84,0.08)", borderColor: "#1DB954" },
-  bacBig: { fontSize: 52, fontWeight: "bold" },
-  bacMg: { color: "#aaa", fontSize: 13, marginTop: 4 },
-  verdict: { fontSize: 13, fontWeight: "800", letterSpacing: 2, marginTop: 8 },
-  clearBtn: { marginTop: 16, padding: 8 },
-  clearText: { color: "#444", fontSize: 12, fontWeight: "600" },
+  resultBadge: {
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  resultVerdict: {
+    fontSize: 13,
+    fontWeight: "800",
+    letterSpacing: 1,
+  },
+  resultBac: {
+    fontSize: 56,
+    fontWeight: "800",
+    letterSpacing: -1,
+  },
+  resultBacMg: {
+    color: "#666",
+    fontSize: 13,
+    marginTop: -8,
+  },
+  resultMeta: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 24,
+    marginTop: 4,
+  },
+  resultMetaItem: {
+    alignItems: "center",
+  },
+  resultMetaLabel: {
+    color: "#555",
+    fontSize: 10,
+    letterSpacing: 0.5,
+    marginBottom: 2,
+  },
+  resultMetaValue: {
+    color: "#aaa",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  resultMetaDivider: {
+    width: 1,
+    height: 28,
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+  clearBtn: {
+    marginTop: 4,
+    paddingHorizontal: 32,
+    paddingVertical: 12,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+  },
+  clearBtnText: {
+    color: "#666",
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 1,
+  },
 
-  historySection: { marginTop: 8 },
-  historyRow: {
-    flexDirection: "row", justifyContent: "space-between",
-    paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#1a1a1a",
+  // ── Disconnect button ─────────────────────────────────────────────────────
+  disconnectBtn: {
+    alignItems: "center",
+    justifyContent: "center",
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    backgroundColor: "rgba(255,255,255,0.03)",
   },
-  historyBac: { fontWeight: "600", fontSize: 14 },
-  historyTime: { color: "#555", fontSize: 12 },
+  disconnectBtnText: {
+    color: "#555",
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 1,
+  },
+
+  // ── History ───────────────────────────────────────────────────────────────
+  historySection: {
+    marginTop: 16,
+    gap: 4,
+  },
+  historyRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.04)",
+    gap: 10,
+  },
+  historyDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  historyBac: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  historyTime: {
+    color: "#555",
+    fontSize: 11,
+  },
+  historyVerdict: {
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+    width: 40,
+    textAlign: "right",
+  },
+
+  // ── Legal note ────────────────────────────────────────────────────────────
+  legalNote: {
+    color: "#282828",
+    fontSize: 9,
+    textAlign: "center",
+    marginTop: 24,
+  },
 });
