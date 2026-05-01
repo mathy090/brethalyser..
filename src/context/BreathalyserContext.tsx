@@ -1,218 +1,226 @@
+// src/context/BreathalyserContext.tsx
 import React, {
-  createContext, useContext, useEffect,
-  useState, useCallback, useRef,
-} from "react";
-import { breathalyser, type DeviceStatus, type BACResult, type GetReadingResult } from "../features/breathalyser";
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+} from 'react';
+import { breathalyser, ScannedDevice } from '../features/breathalyser';
 
-interface BreathalyserContextType {
-  status: DeviceStatus;
-  result: BACResult | null;
-  history: BACResult[];
-  errorMsg: string;
-  recalMsg: string;
-  battery: number;
-  isConnected: boolean;
-  isAwaitingBac: boolean;
-  connectedName: string;
-  pendingQueueCount: number;
-  requestScan: () => Promise<void>;
-  clearResult: () => void;
-  getReading: (options?: any) => Promise<GetReadingResult>;
-  announceAccessibility: (message: string, priority?: "assertive" | "polite") => void;
+export interface Result {
+  bacPercent: string;
+  bacMg: string;
+  overLimit: boolean;
+  timestamp: number;
 }
 
-const BreathalyserContext = createContext<BreathalyserContextType>({
-  status: "disconnected",
-  result: null,
-  history: [],
-  errorMsg: "",
-  recalMsg: "",
-  battery: 0,
-  isConnected: false,
-  isAwaitingBac: false,
-  connectedName: "",
-  pendingQueueCount: 0,
-  requestScan: async () => {},
-  clearResult: () => {},
-  getReading: async () => ({ success: false, error: "device_not_ready" }),
-  announceAccessibility: () => {},
-});
+interface BreathalyserContextValue {
+  isConnected: boolean;
+  deviceStatus: string;         // 'disconnected' | 'warmup' | 'ready' | 'scanning' | 'recalibrating'
+  result: Result | null;
+  history: Result[];
+  clearResult: () => void;
+  connectMsg: string | null;
+  devices: ScannedDevice[];
+  setDevices: React.Dispatch<React.SetStateAction<ScannedDevice[]>>;
+  setDeviceStatus: (status: string) => void;
+  isReadingActive: boolean;
+  isReadingComplete: boolean;
+  progressPercent: number;
+  countdownSeconds: number;
+  setReadingActive: (v: boolean) => void;
+  setReadingComplete: (v: boolean) => void;
+  setProgressPercent: (v: number) => void;
+}
 
-export const useBreathalyser = () => useContext(BreathalyserContext);
+const BreathalyserContext = createContext<BreathalyserContextValue | undefined>(undefined);
 
-export function BreathalyserProvider({ children }: { children: React.ReactNode }) {
-  const [status, setStatus] = useState<DeviceStatus>("disconnected");
-  const [result, setResult] = useState<BACResult | null>(null);
-  const [history, setHistory] = useState<BACResult[]>([]);
-  const [errorMsg, setErrorMsg] = useState("");
-  const [recalMsg, setRecalMsg] = useState("");
-  const [battery, setBattery] = useState(0);
-  const [connectedName, setConnectedName] = useState("");
+const BAC_LIMIT = 0.05;
+const WARMUP_TOTAL_SEC = 30;
+const RECALIB_TOTAL_SEC = 20;
+
+export const BreathalyserProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isConnected, setIsConnected] = useState(false);
-  const [isAwaitingBac, setIsAwaitingBac] = useState(false);
-  const [pendingQueueCount, setPendingQueueCount] = useState(0);
+  const [deviceStatus, setDeviceStatus] = useState('disconnected');
+  const [result, setResult] = useState<Result | null>(null);
+  const [history, setHistory] = useState<Result[]>([]);
+  const [connectMsg, setConnectMsg] = useState<string | null>(null);
+  const [devices, setDevices] = useState<ScannedDevice[]>([]);
 
-  const recalTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const awaitingRef = useRef(false);
+  const [isReadingActive, setReadingActive] = useState(false);
+  const [isReadingComplete, setReadingComplete] = useState(false);
+  const [progressPercent, setProgressPercent] = useState(0);
+  const [countdownSeconds, setCountdownSeconds] = useState(0);
 
+  const progressRef = useRef(0);
+  const scanTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isScanningRef = useRef(false);
+
+  const flashMessage = useCallback((msg: string) => {
+    setConnectMsg(msg);
+    setTimeout(() => setConnectMsg(null), 3500);
+  }, []);
+
+  const toProgressPercent = (remaining: number, total: number) => {
+    const elapsed = total - remaining;
+    return (elapsed / total) * 100;
+  };
+
+  // ─── Handle incoming BLE messages ────────────
   useEffect(() => {
     const unsub = breathalyser.on((event) => {
-      switch (event.type) {
-        case "status":
-          setStatus(event.status);
-          if (event.status !== "error") setErrorMsg("");
-          if (["connected", "ready", "warmup", "recalibrating"].includes(event.status)) {
-            setIsConnected(true);
-            setConnectedName(breathalyser.getConnectedDeviceName());
-          }
-          if (event.status === "scanning_bac") {
-            setIsConnected(true);
-          }
-          if (event.status === "disconnected") {
-            setIsConnected(false);
-            setConnectedName("");
-            setBattery(0);
-            if (awaitingRef.current) {
-              setIsAwaitingBac(false);
-              awaitingRef.current = false;
-            }
-          }
-          if (event.status === "ready" && awaitingRef.current) {
-            setIsAwaitingBac(false);
-            awaitingRef.current = false;
-          }
-          if (event.status === "error" && awaitingRef.current) {
-            setIsAwaitingBac(false);
-            awaitingRef.current = false;
-          }
-          break;
+      if (event.type === 'status') {
+        if (event.status === 'connected') {
+          setIsConnected(true);
+          // Do NOT set deviceStatus to 'warmup' here – let the Arduino tell us
+          flashMessage('Device connected');
+        } else if (event.status === 'disconnected') {
+          setIsConnected(false);
+          setDeviceStatus('disconnected');
+          setResult(null);
+          setReadingActive(false);
+          setReadingComplete(false);
+          setProgressPercent(0);
+          setCountdownSeconds(0);
+          flashMessage('Device disconnected');
+        } else if (event.status === 'error') {
+          flashMessage(event.message || 'Connection error');
+        }
+      }
 
-        case "result":
-          setResult(event.result);
-          setHistory(prev => [event.result, ...prev].slice(0, 20));
-          setRecalMsg("");
-          setIsAwaitingBac(false);
-          awaitingRef.current = false;
-          break;
+      if (event.type === 'reading') {
+        const msg = event.value.trim();
+        if (!msg) return;
 
-        case "battery":
-          setBattery(event.level);
-          break;
+        if (msg.startsWith('STATUS:')) {
+          const parts = msg.substring(7).split(':');
+          const status = parts[0];
+          const param = parts.length > 1 ? parseInt(parts[1], 10) : undefined;
 
-        case "recal":
-          setRecalMsg("Sensor elevated — recalibrating. Wait before next reading.");
-          if (awaitingRef.current) {
-            setIsAwaitingBac(false);
-            awaitingRef.current = false;
+          switch (status) {
+            case 'WARMUP':
+              setDeviceStatus('warmup');
+              setReadingActive(false);
+              if (param !== undefined) {
+                setCountdownSeconds(param);
+                setProgressPercent(toProgressPercent(param, WARMUP_TOTAL_SEC));
+              }
+              break;
+
+            case 'READY':
+              setDeviceStatus('ready');
+              setProgressPercent(0);
+              setCountdownSeconds(0);
+              setReadingActive(false);
+              setReadingComplete(false);
+              break;
+
+            case 'SCANNING':
+              setDeviceStatus('scanning');
+              setReadingActive(true);
+              setReadingComplete(false);
+              setProgressPercent(0);
+              setCountdownSeconds(0);
+              startScanningProgress();
+              break;
+
+            case 'RECALIBRATING':
+              setDeviceStatus('recalibrating');
+              setReadingActive(false);
+              setReadingComplete(true);
+              if (param !== undefined) {
+                setCountdownSeconds(param);
+                setProgressPercent(toProgressPercent(param, RECALIB_TOTAL_SEC));
+              }
+              break;
           }
-          break;
+        }
 
-        case "stable":
-          setRecalMsg("Recalibration complete.");
-          if (recalTimer.current) clearTimeout(recalTimer.current);
-          recalTimer.current = setTimeout(() => setRecalMsg(""), 3_000);
-          break;
+        if (msg.startsWith('BAC:')) {
+          stopScanningProgress();
+          const bacValue = msg.substring(4);
+          const bacNum = parseFloat(bacValue);
+          const overLimit = bacNum >= BAC_LIMIT;
 
-        case "error":
-          setErrorMsg(event.message);
-          if (awaitingRef.current) {
-            setIsAwaitingBac(false);
-            awaitingRef.current = false;
-          }
-          break;
+          const newResult: Result = {
+            bacPercent: `${bacNum.toFixed(2)}%`,
+            bacMg: `${(bacNum * 10).toFixed(2)} mg/L`,
+            overLimit,
+            timestamp: Date.now(),
+          };
 
-        case "progress":
-          if (__DEV__ && event.step === "awaiting_sensor") {
-            console.log("[Progress] Sensor active");
-          }
-          break;
-
-        case "accessibility":
-          // Handled by screen component via breathalyser.on()
-          break;
-
-        case "debug":
-          // console.log("[BLE]", event.message);
-          break;
+          setResult(newResult);
+          setHistory((prev) => [newResult, ...prev]);
+          setProgressPercent(100);
+          setCountdownSeconds(0);
+          setReadingComplete(true);
+        }
       }
     });
 
-    const queueInterval = setInterval(() => {
-      setPendingQueueCount(breathalyser.getPendingQueueCount());
-    }, 2000);
+    return unsub;
+  }, [flashMessage]);
 
-    return () => {
-      unsub();
-      clearInterval(queueInterval);
-      if (recalTimer.current) clearTimeout(recalTimer.current);
-    };
+  const startScanningProgress = useCallback(() => {
+    stopScanningProgress();
+    isScanningRef.current = true;
+    progressRef.current = 0;
+    setProgressPercent(0);
+
+    scanTimerRef.current = setInterval(() => {
+      if (!isScanningRef.current) return;
+      progressRef.current = Math.min(progressRef.current + 2, 98);
+      setProgressPercent(progressRef.current);
+    }, 40);
   }, []);
 
-  const requestScan = useCallback(async () => {
-    if (!breathalyser.isConnected()) {
-      setErrorMsg("No device connected — go to the Breathalyser tab.");
-      return;
-    }
-    const currentStatus = breathalyser.getStatus();
-    if (currentStatus !== "ready" && currentStatus !== "connected") {
-      return;
-    }
-    setResult(null);
-    setErrorMsg("");
-    setIsAwaitingBac(true);
-    awaitingRef.current = true;
-    try {
-      await breathalyser.requestScan();
-    } catch (err: any) {
-      setErrorMsg(err?.message ?? "Scan request failed — please try again.");
-      setIsAwaitingBac(false);
-      awaitingRef.current = false;
+  const stopScanningProgress = useCallback(() => {
+    isScanningRef.current = false;
+    if (scanTimerRef.current) {
+      clearInterval(scanTimerRef.current);
+      scanTimerRef.current = null;
     }
   }, []);
+
+  useEffect(() => {
+    return () => stopScanningProgress();
+  }, [stopScanningProgress]);
 
   const clearResult = useCallback(() => {
     setResult(null);
-    setErrorMsg("");
-    setIsAwaitingBac(false);
-    awaitingRef.current = false;
+    setReadingComplete(false);
   }, []);
 
-  const getReading = useCallback(async (options: any = {}) => {
-    return await breathalyser.getReading({
-      ...options,
-      onProgress: (step: any) => {
-        if (__DEV__ && step === "awaiting_sensor") {
-          console.log("[Progress] Sensor active");
-        }
-      },
-      onAccessibilityAnnouncement: (msg: string, priority: any) => {
-        announceAccessibility(msg, priority);
-      }
-    });
-  }, []);
-
-  const announceAccessibility = useCallback((message: string, priority: "assertive" | "polite" = "polite") => {
-    // Screen listens via breathalyser.on() for "accessibility" events
-  }, []);
+  const value: BreathalyserContextValue = {
+    isConnected,
+    deviceStatus,
+    result,
+    history,
+    clearResult,
+    connectMsg,
+    devices,
+    setDevices,
+    setDeviceStatus,
+    isReadingActive,
+    isReadingComplete,
+    progressPercent,
+    countdownSeconds,
+    setReadingActive,
+    setReadingComplete,
+    setProgressPercent,
+  };
 
   return (
-    <BreathalyserContext.Provider value={{
-      status,
-      result,
-      history,
-      errorMsg,
-      recalMsg,
-      battery,
-      isConnected,
-      isAwaitingBac,
-      connectedName,
-      pendingQueueCount,
-      requestScan,
-      clearResult,
-      getReading,
-      announceAccessibility,
-    }}>
+    <BreathalyserContext.Provider value={value}>
       {children}
     </BreathalyserContext.Provider>
   );
-}
+};
+
+export const useBreathalyser = () => {
+  const ctx = useContext(BreathalyserContext);
+  if (!ctx) throw new Error('useBreathalyser must be inside BreathalyserProvider');
+  return ctx;
+};
