@@ -1,34 +1,43 @@
 import { BleManager, Device, State } from 'react-native-ble-plx';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const SERVICE_UUID = "12345678-1234-1234-1234-123456789abc"; 
-const TX_UUID = "12345678-1234-1234-1234-123456789abd";
-const RX_UUID = "12345678-1234-1234-1234-123456789abe";
+const SERVICE_UUID = "12345678-1234-1234-1234-123456789abc";
+const TX_UUID      = "12345678-1234-1234-1234-123456789abd";
+const RX_UUID      = "12345678-1234-1234-1234-123456789abe";
 const STORAGE_KEY_DEVICE_ID = "@blowsafe_last_device_id";
 
 const manager = new BleManager();
 
-export type BreathalyserEvent = 
+export type DeviceStatus =
+  | 'disconnected'
+  | 'scanning'
+  | 'connecting'
+  | 'connected'
+  | 'warmup'
+  | 'ready'
+  | 'scanning_bac'
+  | 'recalibrating'
+  | 'error';
+
+export type BreathalyserEvent =
   | { type: 'ble_state'; state: State }
   | { type: 'scan_result'; devices: { id: string; name: string }[] }
-  | { type: 'status'; status: 'scanning' | 'connecting' | 'connected' | 'disconnected' | 'error'; deviceId?: string; message?: string }
+  | { type: 'status'; status: DeviceStatus; deviceId?: string; message?: string }
   | { type: 'reading'; value: string };
 
 let listeners: ((event: BreathalyserEvent) => void)[] = [];
 let connectedDevice: Device | null = null;
-let isScanning = false;
+let activeScan = false;
 
 manager.onStateChange((state) => {
-  if (listeners.length > 0) {
-    breathalyser.emit({ type: 'ble_state', state });
-  }
+  breathalyser.emit({ type: 'ble_state', state });
 }, true);
 
 export const breathalyser = {
   on: (callback: (event: BreathalyserEvent) => void) => {
     listeners.push(callback);
-    return () => { 
-      listeners = listeners.filter(l => l !== callback); 
+    return () => {
+      listeners = listeners.filter(l => l !== callback);
     };
   },
 
@@ -39,105 +48,99 @@ export const breathalyser = {
   initialize: async () => {},
 
   scan: async () => {
-    // If already scanning, return silently (no error)
-    if (isScanning) return;
-
-    // Reset guard before starting
-    isScanning = true;
+    if (activeScan) return;
+    activeScan = true;
 
     try {
-      await manager.stopDeviceScan(); // stop any existing scan
-    } catch (e) {
-      // ignore
-    }
+      manager.stopDeviceScan();
+    } catch (_) {}
 
     breathalyser.emit({ type: 'status', status: 'scanning' });
 
     const seenIds = new Set<string>();
 
-    manager.startDeviceScan(null, null, (error, device) => {
-      if (error) {
-        // Only emit an error if we're still actively scanning (guard against stale callbacks)
-        if (isScanning) {
-          console.warn("Scan Error:", error.message);
-          breathalyser.emit({ type: 'status', status: 'error', message: error.message });
-          // Fail-safe: stop scanning and allow retry
-          manager.stopDeviceScan();
-          isScanning = false;
-        }
-        return;
-      }
+    manager.startDeviceScan(null, { allowDuplicates: false }, (_error, device) => {
+      // Ignore errors silently — only surface timeout/connected to the UI
+      if (!device || !activeScan) return;
 
-      if (device && isScanning) {
-        const name = device.name || device.localName;
-        if (name && name.includes("BlowSafe")) {
-          if (!seenIds.has(device.id)) {
-            seenIds.add(device.id);
-            breathalyser.emit({ 
-              type: 'scan_result', 
-              devices: [{ id: device.id, name: name }] 
-            });
-          }
+      const name = device.name ?? device.localName ?? '';
+      if (name.includes('BlowSafe')) {
+        if (!seenIds.has(device.id)) {
+          seenIds.add(device.id);
+          breathalyser.emit({
+            type: 'scan_result',
+            devices: [{ id: device.id, name }],
+          });
         }
       }
     });
   },
 
   stopScan: async () => {
+    activeScan = false;
     try {
-      await manager.stopDeviceScan();
-    } catch (e) {}
-    isScanning = false;
+      manager.stopDeviceScan();
+    } catch (_) {}
   },
 
   connect: async (device: { id: string; name?: string }) => {
     const state = await manager.state();
-    if (state === State.PoweredOff) throw new Error("Bluetooth is off");
+    if (state !== State.PoweredOn) {
+      breathalyser.emit({ type: 'status', status: 'error', message: 'Bluetooth is off' });
+      throw new Error('Bluetooth is off');
+    }
 
     await breathalyser.stopScan();
     breathalyser.emit({ type: 'status', status: 'connecting', deviceId: device.id });
 
-    try {
+    // 15-second connection timeout
+    const connectionTimeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Connection timed out')), 15000)
+    );
+
+    const doConnect = async () => {
       const connected = await manager.connectToDevice(device.id, {
-        autoConnect: true,
+        autoConnect: false,
         requestMTU: 512,
       });
+
       connectedDevice = connected;
 
-      connected.onDisconnected((error, dev) => {
-        breathalyser.emit({
-          type: 'status',
-          status: 'disconnected',
-          deviceId: dev?.id,
-        });
+      connected.onDisconnected((_err, dev) => {
+        connectedDevice = null;
+        breathalyser.emit({ type: 'status', status: 'disconnected', deviceId: dev?.id });
       });
 
       await connected.discoverAllServicesAndCharacteristics();
 
-      await connected.monitorCharacteristicForService(
+      connected.monitorCharacteristicForService(
         SERVICE_UUID,
         TX_UUID,
-        (error, characteristic) => {
-          if (error) return;
-          if (characteristic?.value) {
+        (_err, characteristic) => {
+          if (!characteristic?.value) return;
+          try {
             const raw = atob(characteristic.value);
             raw.split('\n').forEach(line => {
               const msg = line.trim();
-              if (msg) {
-                breathalyser.emit({ type: 'reading', value: msg });
-              }
+              if (msg) breathalyser.emit({ type: 'reading', value: msg });
             });
-          }
+          } catch (_) {}
         }
       );
 
       await AsyncStorage.setItem(STORAGE_KEY_DEVICE_ID, device.id);
       breathalyser.emit({ type: 'status', status: 'connected', deviceId: device.id });
+    };
 
-    } catch (error: any) {
+    try {
+      await Promise.race([doConnect(), connectionTimeout]);
+    } catch (err: any) {
       connectedDevice = null;
-      breathalyser.emit({ type: 'status', status: 'error', message: error.message });
-      throw error;
+      // Only emit error for timeout; ignore BLE cancelled/internal errors
+      if (err.message === 'Connection timed out') {
+        breathalyser.emit({ type: 'status', status: 'error', message: 'Connection timed out' });
+      }
+      throw err;
     }
   },
 
@@ -149,7 +152,7 @@ export const breathalyser = {
         RX_UUID,
         Buffer.from(cmd).toString('base64')
       );
-    } catch (e) {}
+    } catch (_) {}
   },
 
   disconnect: async () => {
@@ -159,8 +162,8 @@ export const breathalyser = {
         connectedDevice = null;
       }
       await AsyncStorage.removeItem(STORAGE_KEY_DEVICE_ID);
-      breathalyser.emit({ type: 'status', status: 'disconnected' });
-    } catch (e) {}
+    } catch (_) {}
+    breathalyser.emit({ type: 'status', status: 'disconnected' });
   },
 
   isStillConnected: async (): Promise<boolean> => {
@@ -168,14 +171,22 @@ export const breathalyser = {
     try {
       const devices = await manager.connectedDevices([SERVICE_UUID]);
       return devices.some(d => d.id === connectedDevice?.id);
-    } catch {
+    } catch (_) {
       return false;
     }
   },
 
   getLastConnectedDeviceId: async (): Promise<string | null> => {
-    return await AsyncStorage.getItem(STORAGE_KEY_DEVICE_ID);
-  }
+    try {
+      return await AsyncStorage.getItem(STORAGE_KEY_DEVICE_ID);
+    } catch (_) {
+      return null;
+    }
+  },
+
+  requestScan: async () => {
+    await breathalyser.sendCommand('SCAN');
+  },
 };
 
 export interface ScannedDevice {
