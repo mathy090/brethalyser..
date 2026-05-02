@@ -16,7 +16,7 @@ import { connectMongo } from "./config/mongo";
 import { initSocket } from "./config/socket";
 import authRoutes from "./routes/auth";
 import adminRoutes from "./routes/admin";
-import uploadRoutes from "./routes/upload"; // 🔧 Import upload route
+import uploadRoutes from "./routes/upload";
 
 const app = express();
 const httpServer = createServer(app);
@@ -36,7 +36,7 @@ app.use(express.json({ limit: "10mb" }));
 // ────────────────────────────────
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
-app.use("/api", uploadRoutes); // 🔧 Register upload route → /api/upload
+app.use("/api", uploadRoutes); // → /api/upload
 
 // Health
 app.get("/", (_req, res) => {
@@ -127,7 +127,7 @@ async function startServer() {
 }
 
 // ────────────────────────────────
-// Crash debugging (VERY IMPORTANT)
+// Crash debugging & Graceful Shutdown
 // ────────────────────────────────
 process.on("uncaughtException", (err) => {
   console.error("❌ Uncaught Exception:", err);
@@ -137,8 +137,18 @@ process.on("unhandledRejection", (reason) => {
   console.error("❌ Unhandled Rejection:", reason);
 });
 
+// 🔥 Graceful shutdown for Render deploys
 process.on("SIGTERM", () => {
-  console.log("🔄 SIGTERM received (Render restart)");
+  console.log("🔄 SIGTERM received - starting graceful shutdown...");
+  httpServer.close(() => {
+    console.log("✅ HTTP server closed");
+    process.exit(0);
+  });
+  // Force exit after 30s if connections don't close
+  setTimeout(() => {
+    console.error("❌ Forced shutdown after timeout");
+    process.exit(1);
+  }, 30000);
 });
 
 // Start app
