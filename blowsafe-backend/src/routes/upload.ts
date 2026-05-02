@@ -1,8 +1,14 @@
+/**
+ * src/routes/upload.ts
+ * Unauthenticated route for uploading driver ID photo + BAC reading data
+ * Stores photo in /uploads and metadata in MongoDB
+ */
+
 import express, { Request, Response, NextFunction } from "express";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import { Driver, BacReading } from "../models/BacUpload";
+import { Driver, BacReading, IDriver, IBacReading } from "../models/BacUpload";
 import { env } from "../config/env";
 
 const router = express.Router();
@@ -26,7 +32,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
   fileFilter: (_req, file, cb) => {
     if (!file.mimetype.startsWith("image/")) {
       return cb(new Error("Only image files allowed"));
@@ -68,6 +74,14 @@ router.post(
   upload.single("photo"),
   validateUpload,
   async (req: Request, res: Response) => {
+    // Handle client aborts gracefully
+    req.on("aborted", () => {
+      console.log("⚠️ Client aborted upload request");
+      if (!res.headersSent) {
+        res.status(499).json({ error: "Upload cancelled by client" });
+      }
+    });
+
     try {
       const { parsedDriver, parsedBac } = req;
       const file = req.file;
@@ -76,17 +90,17 @@ router.post(
         return res.status(400).json({ error: "Photo is required" });
       }
 
-      // Build public URL
+      // Build public URL (adjust for your deployment)
       const photoUrl = `${env.API_BASE_URL}/uploads/driver-photos/${file.filename}`;
 
       // Save driver
-      const driver = await Driver.create({
+      const driver: IDriver = await Driver.create({
         ...parsedDriver,
         photoUrl,
       });
 
       // Save BAC reading
-      const reading = await BacReading.create({
+      const reading: IBacReading = await BacReading.create({
         driver: driver._id,
         bacValue: Number(parsedBac.bac),
         overLimit: parsedBac.overLimit,
@@ -106,6 +120,14 @@ router.post(
 
     } catch (err: any) {
       console.error("❌ Upload error:", err);
+
+      // Handle MongoDB duplicate key error
+      if (err.code === 11000) {
+        const field = Object.keys(err.keyPattern || {})[0];
+        return res.status(409).json({ 
+          error: `Driver with this ${field} already exists` 
+        });
+      }
 
       return res.status(500).json({
         error: "Upload failed",

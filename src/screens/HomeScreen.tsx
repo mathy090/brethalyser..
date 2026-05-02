@@ -20,7 +20,7 @@ import { useBreathalyser } from "../context/BreathalyserContext";
 import { calculateFine } from "../helpers/fineCalculator";
 
 export default function HomeScreen() {
-  // ✅ ALL HOOKS MUST BE CALLED UNCONDITIONALLY AT THE TOP
+  // ✅ ALL HOOKS CALLED UNCONDITIONALLY AT TOP
   const officerContext = useOfficer();
   const officer = officerContext?.officer ?? null;
   
@@ -44,83 +44,113 @@ export default function HomeScreen() {
     []
   );
 
-  // Upload Handler
+  // Upload Handler - FIXED for React Native
   const handleUpload = useCallback(async () => {
-  const cleanBackendUrl = BACKEND_URL?.trim();
+    // ✅ 6. SNAPSHOT STATE LOCK (prevents mid-change bugs)
+    const snapshot = {
+      driverValid,
+      driverData,
+      photoUri,
+      bacResult,
+    };
 
-  if (!cleanBackendUrl || !cleanBackendUrl.startsWith("http")) {
-    Alert.alert("Config Error", "Invalid BACKEND_URL");
-    return;
-  }
+    if (!snapshot.driverValid || !snapshot.bacResult || !snapshot.photoUri || !snapshot.driverData) {
+      Alert.alert("Missing Info", "Complete all required fields first");
+      return;
+    }
 
-  if (!driverValid || !bacResult || !photoUri || !driverData) {
-    Alert.alert("Missing Info", "Complete all required fields first");
-    return;
-  }
+    const cleanBackendUrl = BACKEND_URL?.trim();
+    if (!cleanBackendUrl || !cleanBackendUrl.startsWith("http")) {
+      Alert.alert("Config Error", "Invalid BACKEND_URL");
+      return;
+    }
 
-  setIsUploading(true);
+    setIsUploading(true);
 
-  try {
-    const formData = new FormData();
-
-    // Driver data
-    formData.append("driverData", JSON.stringify(driverData));
-
-    // BAC data
-    const bacValue = parseFloat(bacResult.bacPercent.replace("%", ""));
-    const fineInfo = calculateFine(bacValue);
-
-    formData.append(
-      "bacData",
-      JSON.stringify({
-        bac: bacValue.toFixed(2),
-        timestamp: bacResult.timestamp,
-        fine: fineInfo?.amount || 0,
-        overLimit: bacResult.overLimit,
-      })
-    );
-
-    // Image file
-    const fileResponse = await fetch(photoUri);
-    const fileBlob = await fileResponse.blob();
-
-    formData.append("photo", fileBlob as any, "driver.jpg");
-
-   const uploadUrl = `${BACKEND_URL}/api/upload`;
-
-    const response = await fetch(uploadUrl, {
-      method: "POST",
-      body: formData,
-    });
-
-    const text = await response.text();
-
-    let result;
     try {
-      result = JSON.parse(text);
-    } catch {
-      throw new Error("Server returned invalid response");
+      const formData = new FormData();
+
+      // Driver data
+      formData.append("driverData", JSON.stringify(snapshot.driverData));
+
+      // BAC data
+      const bacValue = parseFloat(snapshot.bacResult.bacPercent.replace("%", ""));
+      const fineInfo = calculateFine(bacValue);
+
+      formData.append(
+        "bacData",
+        JSON.stringify({
+          bac: bacValue.toFixed(2),
+          timestamp: snapshot.bacResult.timestamp,
+          fine: fineInfo?.amount || 0,
+          overLimit: snapshot.bacResult.overLimit,
+        })
+      );
+
+      // ✅ 1. FIX IMAGE UPLOAD (React Native compatible format - NOT blob)
+      formData.append("photo", {
+        uri: snapshot.photoUri,
+        name: "driver-id.jpg",
+        type: "image/jpeg",
+      } as any);
+
+      const uploadUrl = `${cleanBackendUrl}/api/upload`;
+
+      // ✅ 2. ADD REQUEST DEBUGGING
+      console.log("📤 Upload URL:", uploadUrl);
+      console.log("👤 Driver valid:", snapshot.driverValid);
+      console.log("📸 Photo URI:", snapshot.photoUri);
+      console.log("🧠 BAC data:", snapshot.bacResult);
+
+      // ✅ 5. ADD TIMEOUT (prevent hangs)
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 60000); // 60 seconds for file uploads
+
+      const response = await fetch(uploadUrl, {
+        method: "POST",
+        body: formData,
+        signal: controller.signal, // ✅ Attach abort signal
+        // 🔥 DO NOT set Content-Type header - RN handles multipart boundary automatically
+      });
+
+      clearTimeout(timeout); // ✅ Clear timeout after response
+
+      // ✅ 3. FIX RESPONSE SAFETY
+      const contentType = response.headers.get("content-type");
+      if (!contentType?.includes("application/json")) {
+        throw new Error("Server did not return JSON");
+      }
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result?.error || `Upload failed (${response.status})`);
+      }
+
+      Alert.alert(
+        "Upload Successful",
+        `Driver: ${snapshot.driverData.firstName} ${snapshot.driverData.surname}\nBAC: ${snapshot.bacResult.bacPercent}`
+      );
+      
+    } catch (err: any) {
+      console.error("❌ Upload error:", err);
+
+      // ✅ 4. IMPROVE ERROR HANDLING
+      let msg = err.message || "Unknown error";
+
+      if (err.name === "AbortError") {
+        msg = "Request timed out (server took too long)";
+      } else if (err.message?.includes("Network request failed")) {
+        msg = "Network issue. Check:\n1. Backend is running\n2. BACKEND_URL is correct\n3. Device has internet";
+      } else if (err.message?.includes("Server did not return JSON")) {
+        msg = "Server returned invalid response format";
+      }
+
+      Alert.alert("Upload Failed", msg);
+    } finally {
+      setIsUploading(false);
     }
-
-    if (!response.ok) {
-      throw new Error(result?.error || `Upload failed (${response.status})`);
-    }
-
-    Alert.alert(
-      "Upload Successful",
-      `Driver: ${driverData.firstName} ${driverData.surname}\nBAC: ${bacResult.bacPercent}`
-    );
-  } catch (err: any) {
-    const msg =
-      err?.message?.includes("Network request failed")
-        ? "Cannot reach server (check backend or Render sleep)"
-        : err.message;
-
-    Alert.alert("Upload Failed", msg);
-  } finally {
-    setIsUploading(false);
-  }
-}, [driverValid, bacResult, photoUri, driverData]);
+  }, [driverValid, bacResult, photoUri, driverData]);
 
   // Calculate fine for UI display
   const fineInfo = bacResult ? calculateFine(parseFloat(bacResult.bacPercent.replace("%", ""))) : null;
