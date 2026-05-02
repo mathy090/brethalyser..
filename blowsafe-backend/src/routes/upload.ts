@@ -1,7 +1,7 @@
 /**
  * src/routes/upload.ts
  * Unauthenticated route for uploading driver ID photo + BAC reading data
- * Stores photo in /uploads and metadata in MongoDB
+ * Follows same pattern as avatarRoutes.js
  */
 
 import express, { Request, Response, NextFunction } from "express";
@@ -19,25 +19,17 @@ if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// ─── Multer config (SAFE) ───────────────────────────────────────────────
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, uploadDir); // ❗ no async here
-  },
-  filename: (_req, file, cb) => {
-    const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, `${unique}-${file.originalname}`);
-  },
-});
-
+// ─── Multer config (MEMORY STORAGE - same as avatarRoutes) ──────────────
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(), // Store in RAM, not disk
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
   fileFilter: (_req, file, cb) => {
-    if (!file.mimetype.startsWith("image/")) {
-      return cb(new Error("Only image files allowed"));
+    const allowed = ["image/jpeg", "image/png", "image/webp"];
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only image files allowed"), false);
     }
-    cb(null, true);
   },
 });
 
@@ -74,14 +66,6 @@ router.post(
   upload.single("photo"),
   validateUpload,
   async (req: Request, res: Response) => {
-    // Handle client aborts gracefully
-    req.on("aborted", () => {
-      console.log("⚠️ Client aborted upload request");
-      if (!res.headersSent) {
-        res.status(499).json({ error: "Upload cancelled by client" });
-      }
-    });
-
     try {
       const { parsedDriver, parsedBac } = req;
       const file = req.file;
@@ -90,16 +74,25 @@ router.post(
         return res.status(400).json({ error: "Photo is required" });
       }
 
-      // Build public URL (adjust for your deployment)
-      const photoUrl = `${env.API_BASE_URL}/uploads/driver-photos/${file.filename}`;
+      // ── Save file to disk (same pattern as avatarRoutes) ──────────────
+      const ext = file.mimetype.split("/")[1] ?? "jpg";
+      const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
+      const filename = `${unique}-driver.${ext}`;
+      const filePath = path.join(uploadDir, filename);
 
-      // Save driver
+      // Write buffer to disk
+      fs.writeFileSync(filePath, file.buffer);
+
+      // Build public URL (same manual construction as avatarRoutes)
+      const photoUrl = `${env.API_BASE_URL}/uploads/driver-photos/${filename}`;
+
+      // ── Save driver to MongoDB ────────────────────────────────────────
       const driver: IDriver = await Driver.create({
         ...parsedDriver,
         photoUrl,
       });
 
-      // Save BAC reading
+      // ── Save BAC reading to MongoDB ───────────────────────────────────
       const reading: IBacReading = await BacReading.create({
         driver: driver._id,
         bacValue: Number(parsedBac.bac),
@@ -107,6 +100,8 @@ router.post(
         fineAmount: Number(parsedBac.fine),
         recordedAt: new Date(parsedBac.timestamp),
       });
+
+      console.log(`[Upload] ✅ Saved driver ${driver._id} + reading ${reading._id}`);
 
       return res.status(201).json({
         success: true,
@@ -136,10 +131,5 @@ router.post(
     }
   }
 );
-
-// ─── Serve uploads (DEV ONLY) ───────────────────────────────────────────
-if (env.NODE_ENV === "development") {
-  router.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
-}
 
 export default router;

@@ -1,6 +1,7 @@
 /**
  * src/screens/HomeScreen.tsx
  * Home screen - Driver management, BAC Result Display & Uploads
+ * Upload logic follows same pattern as app/auth/device.tsx
  */
 
 import React, { useState, useCallback } from "react";
@@ -9,7 +10,7 @@ import {
   Image, TouchableOpacity, ScrollView, Alert, ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-// 🔧 Import backend URL using react-native-dotenv
+// 🔧 Import backend URL using react-native-dotenv (same as LoginScreen)
 import { BACKEND_URL } from '@env';
 import { useOfficer } from "../context/OfficerContext";
 import { useNetworkStatus } from "../helpers/network";
@@ -34,7 +35,7 @@ export default function HomeScreen() {
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
 
-  // Capture driver data & photo from DriverCard
+  // Capture driver data & photo from DriverCard (same as device.tsx)
   const handleDriverChange = useCallback(
     (data: DriverData, isValid: boolean, uri: string | null) => {
       setDriverValid(isValid);
@@ -44,9 +45,9 @@ export default function HomeScreen() {
     []
   );
 
-  // Upload Handler - FIXED for React Native
+  // Upload Handler - SAME PATTERN AS device.tsx uploadAvatarToSupabase
   const handleUpload = useCallback(async () => {
-    // ✅ 6. SNAPSHOT STATE LOCK (prevents mid-change bugs)
+    // ✅ SNAPSHOT STATE LOCK (prevents mid-change bugs)
     const snapshot = {
       driverValid,
       driverData,
@@ -70,13 +71,12 @@ export default function HomeScreen() {
     try {
       const formData = new FormData();
 
-      // Driver data
+      // Driver data (same as device.tsx)
       formData.append("driverData", JSON.stringify(snapshot.driverData));
 
       // BAC data
       const bacValue = parseFloat(snapshot.bacResult.bacPercent.replace("%", ""));
       const fineInfo = calculateFine(bacValue);
-
       formData.append(
         "bacData",
         JSON.stringify({
@@ -87,35 +87,30 @@ export default function HomeScreen() {
         })
       );
 
-      // ✅ 1. FIX IMAGE UPLOAD (React Native compatible format - NOT blob)
+      // ✅ PHOTO UPLOAD - SAME PATTERN AS device.tsx (React Native compatible)
+      // @ts-ignore - React Native FormData accepts this format
       formData.append("photo", {
-        uri: snapshot.photoUri,
-        name: "driver-id.jpg",
-        type: "image/jpeg",
-      } as any);
+        uri: snapshot.photoUri,           // file:// URI from DriverCard
+        type: "image/jpeg",               // or detect from URI
+        name: "driver-id.jpg",            // filename backend expects
+      });
 
       const uploadUrl = `${cleanBackendUrl}/api/upload`;
+      console.log("📤 Uploading to:", uploadUrl);
 
-      // ✅ 2. ADD REQUEST DEBUGGING
-      console.log("📤 Upload URL:", uploadUrl);
-      console.log("👤 Driver valid:", snapshot.driverValid);
-      console.log("📸 Photo URI:", snapshot.photoUri);
-      console.log("🧠 BAC data:", snapshot.bacResult);
-
-      // ✅ 5. ADD TIMEOUT (prevent hangs)
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 60000); // 60 seconds for file uploads
-
+      // ✅ DO NOT set Content-Type header - let fetch set multipart boundary
       const response = await fetch(uploadUrl, {
         method: "POST",
         body: formData,
-        signal: controller.signal, // ✅ Attach abort signal
-        // 🔥 DO NOT set Content-Type header - RN handles multipart boundary automatically
+        headers: {
+          Accept: "application/json",  // ✅ Only set Accept
+          // ❌ DO NOT set "Content-Type": "multipart/form-data"
+        },
       });
 
-      clearTimeout(timeout); // ✅ Clear timeout after response
+      console.log("📥 Response status:", response.status);
 
-      // ✅ 3. FIX RESPONSE SAFETY
+      // ✅ Response safety (same as device.tsx)
       const contentType = response.headers.get("content-type");
       if (!contentType?.includes("application/json")) {
         throw new Error("Server did not return JSON");
@@ -135,7 +130,7 @@ export default function HomeScreen() {
     } catch (err: any) {
       console.error("❌ Upload error:", err);
 
-      // ✅ 4. IMPROVE ERROR HANDLING
+      // ✅ Improved error handling (same as device.tsx)
       let msg = err.message || "Unknown error";
 
       if (err.name === "AbortError") {
