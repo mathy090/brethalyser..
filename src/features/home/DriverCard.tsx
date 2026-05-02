@@ -1,5 +1,9 @@
-// src/features/home/DriverCard.tsx
-import React, { useState, useCallback, useRef } from "react";
+/**
+ * src/features/home/DriverCard.tsx
+ * Driver licence scanning with OCR, manual editing, and debounced validation
+ */
+
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity,
   Image, ActivityIndicator, Modal, Alert,
@@ -148,7 +152,7 @@ function ZoomModal({ uri, visible, onClose }: {
   );
 }
 
-// ── Fields block — always mounted, never conditionally rendered ───────────────
+// ── Fields block — with DEBOUNCED VALIDATION ─────────────────────────────────
 
 function FieldsBlock({ data, onChange, retaking, visible }: {
   data: DriverData;
@@ -157,6 +161,30 @@ function FieldsBlock({ data, onChange, retaking, visible }: {
   visible: boolean;
 }) {
   const [focused, setFocused] = useState<keyof DriverData | null>(null);
+
+  // 🔧 Debounced validation hook - prevents error flickering during editing
+  function useDebouncedValidator(
+    value: string,
+    validator: ((v: string) => boolean) | undefined,
+    delay = 500
+  ) {
+    const [isValid, setIsValid] = useState(true);
+    
+    useEffect(() => {
+      if (!validator) {
+        setIsValid(true);
+        return;
+      }
+      
+      const timer = setTimeout(() => {
+        setIsValid(!value || validator(value));
+      }, delay);
+      
+      return () => clearTimeout(timer);
+    }, [value, validator, delay]);
+    
+    return isValid;
+  }
 
   return (
     <View style={[fb.wrap, !visible && fb.hidden]}>
@@ -169,7 +197,11 @@ function FieldsBlock({ data, onChange, retaking, visible }: {
       {FIELD_CONFIGS.map((fc, i) => {
         const val    = data[fc.key];
         const filled = val.length > 0;
-        const valid  = !filled || !VALIDATORS[fc.key] || VALIDATORS[fc.key]!(val);
+        const validator = VALIDATORS[fc.key];
+        
+        // 🔧 Use debounced validation instead of immediate
+        const isValid = useDebouncedValidator(val, validator);
+        
         const isFoc  = focused === fc.key;
         const isLast = i === FIELD_CONFIGS.length - 1;
 
@@ -179,7 +211,7 @@ function FieldsBlock({ data, onChange, retaking, visible }: {
             style={[
               fb.row,
               isFoc  && fb.rowFocused,
-              !valid && filled && fb.rowError,
+              !isValid && filled && fb.rowError, // ← Uses debounced isValid
               isLast && { borderBottomWidth: 0 },
             ]}
           >
@@ -200,7 +232,8 @@ function FieldsBlock({ data, onChange, retaking, visible }: {
               onFocus={() => setFocused(fc.key)}
               onBlur={() => setFocused(null)}
             />
-            {!valid && filled && <View style={fb.errorDot} />}
+            {/* 🔧 Show error dot only when debounced validation fails AND not focused */}
+            {!isValid && filled && !isFoc && <View style={fb.errorDot} />}
           </View>
         );
       })}
@@ -375,7 +408,7 @@ export default function DriverCard({ onDataChange }: Props) {
           </View>
         </View>
 
-        {/* Fields — always mounted */}
+        {/* Fields — always mounted, with debounced validation */}
         <FieldsBlock
           data={data}
           onChange={handleFieldChange}
