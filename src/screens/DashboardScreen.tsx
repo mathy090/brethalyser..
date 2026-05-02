@@ -378,7 +378,7 @@ const styles = StyleSheet.create({
   cardHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 },
   officerId: { color: "#fff", fontSize: 16, fontWeight: "bold" },
   email: { color: "#888", fontSize: 14, marginTop: 2 },
-  statusBadge: { paddingHorizontal: 30, paddingVertical: 12, borderRadius: 40, alignItems: "center", justifyContent: "center" },
+  statusBadge: { paddingHorizontal: 10, paddingVertical: 12, borderRadius: 40, alignItems: "center", justifyContent: "center" },
   statusBadgeText: { color: "#fff", fontSize: 10, fontWeight: "600", flexShrink: 1},
   controlsRow: { flexDirection: "row", justifyContent: "space-between", borderTopWidth: 1, borderTopColor: "#00000091", paddingTop: 2 },
   dropdown: { position: "relative", minWidth: 110 },

@@ -2,13 +2,6 @@
  * src/screens/BreathalyserScreen.tsx
  *
  * Breathalyser screen — pairs with Arduino R4 over BLE.
- *
- * Arduino state machine (from firmware):
- *   CONNECTED → 30s warmup (STATUS:WARMUP:{remaining}) → STATUS:READY
- *   On "SCAN" command: STATUS:SCANNING (immediate) → BAC:{value} (~20s later)
- *
- * Screen states: disconnected | scanning_devices | connecting |
- *                warmup | ready | scanning_bac | result
  */
 
 import React, {
@@ -34,7 +27,6 @@ import { State } from "react-native-ble-plx";
 import { breathalyser, ScannedDevice } from "../features/breathalyser";
 import { useBreathalyser } from "../context/BreathalyserContext";
 import { usePersistentBLE } from "../hooks/usePersistentBLE";
-import { getReading, ReadingError, ReadingResult } from "../helpers/getReading";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -148,28 +140,39 @@ function DeviceCard({
 
 function WarmupRing({ remaining }: { remaining: number }) {
   const total = 30;
-  const progress = Math.max(0, Math.min(1, (total - remaining) / total));
-  const circumference = 2 * Math.PI * 44;
-  const dashOffset = circumference * (1 - progress);
+  const progress = Math.max(0, Math.min(1, remaining / total));
+  
+  // Color Thresholds:
+  // Green: 30–11s remaining
+  // Yellow: 10–6s remaining
+  // Red: 5–0s remaining
+  let ringColor = "#1DB954"; // Green default
+  if (remaining <= 5) {
+    ringColor = "#FF4C4C"; // Red
+  } else if (remaining <= 10) {
+    ringColor = "#FFA500"; // Yellow/Orange
+  }
 
   return (
     <View style={styles.ringContainer}>
       <View style={styles.ringSvgWrap}>
         {/* Background ring */}
         <View style={[styles.ringTrack, { borderColor: "rgba(255,255,255,0.06)" }]} />
-        {/* Progress ring — simulated with border trick */}
+        
+        {/* Progress ring - Simulated with border rotation */}
         <View
           style={[
             styles.ringProgress,
             {
-              borderColor: "#1DB954",
-              transform: [{ rotate: `${-90 + progress * 360}deg` }],
+              borderColor: ringColor,
+              transform: [{ rotate: `${-90 + (1 - progress) * 360}deg` }],
               opacity: progress > 0 ? 1 : 0,
             },
           ]}
         />
+        
         <View style={styles.ringCenter}>
-          <Text style={styles.ringNumber}>{remaining}</Text>
+          <Text style={[styles.ringNumber, { color: ringColor }]}>{remaining}</Text>
           <Text style={styles.ringLabel}>seconds</Text>
         </View>
       </View>
@@ -263,6 +266,7 @@ export default function BreathalyserScreen() {
   // Scan state
   const scanActiveRef = useRef(false);
   const hasAutoAttemptedRef = useRef(false);
+  const autoReadTriggeredRef = useRef(false); // 🔧 Track if auto-read was triggered
 
   // Reading progress animation
   const scanProgress = useRef(new Animated.Value(0)).current;
@@ -289,6 +293,8 @@ export default function BreathalyserScreen() {
       if (event.type === "scan_result") {
         const incoming = event.devices[0];
         if (!incoming) return;
+        
+        // Add device if not already in list
         setFoundDevices((prev) => {
           if (prev.find((d) => d.id === incoming.id)) return prev;
           return [...prev, incoming];
@@ -300,9 +306,19 @@ export default function BreathalyserScreen() {
       if (event.type === "status") {
         if (event.status === "connected") {
           scanActiveRef.current = false;
-          setPhase("warmup");
-          setWarmupRemaining(30);
-          showToast("Device connected");
+          setConnectingId(null); // Clear connecting state
+          showToast("✓ Connected");
+          
+          // 🔧 Auto-trigger reading after successful connection
+          // We wait a tiny bit to ensure state updates, then trigger
+          setTimeout(() => {
+            if (!autoReadTriggeredRef.current) {
+              autoReadTriggeredRef.current = true;
+              // We can't call handleStartReading directly here because it depends on 'phase'
+              // Instead, we let the Arduino send STATUS:READY, which sets phase to 'ready'
+              // Then we trigger the read.
+            }
+          }, 500);
           return;
         }
         if (event.status === "disconnected") {
@@ -311,6 +327,7 @@ export default function BreathalyserScreen() {
           setResult(null);
           setConnectingId(null);
           setFoundDevices([]);
+          autoReadTriggeredRef.current = false; // Reset flag
           showToast("Device disconnected");
           return;
         }
@@ -345,13 +362,21 @@ export default function BreathalyserScreen() {
     if (msg === "STATUS:READY") {
       setPhase("ready");
       setWarmupRemaining(0);
+      
+      // 🔧 Trigger auto-read if this is the first time becoming ready after connect
+      if (autoReadTriggeredRef.current) {
+        autoReadTriggeredRef.current = false; // Consume the trigger
+        // Small delay to ensure UI has updated to 'ready' phase
+        setTimeout(() => {
+          handleStartReading();
+        }, 500);
+      }
       return;
     }
 
     // Scan in progress (Arduino acknowledged SCAN command)
     if (msg === "STATUS:SCANNING") {
-      setPhase("scanning_bac");
-      startScanAnim();
+      // Keep animation running - UI already started it
       return;
     }
 
@@ -413,6 +438,15 @@ export default function BreathalyserScreen() {
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
         ]);
+        
+        // 🔧 FIX #5: Warn about Location requirement for scanning
+        const locationEnabled = await PermissionsAndroid.check(
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
+        );
+        if (!locationEnabled) {
+          showToast("Turn on Location for Bluetooth scanning");
+        }
+
         return (
           result["android.permission.BLUETOOTH_SCAN"] === PermissionsAndroid.RESULTS.GRANTED &&
           result["android.permission.BLUETOOTH_CONNECT"] === PermissionsAndroid.RESULTS.GRANTED
@@ -423,7 +457,8 @@ export default function BreathalyserScreen() {
         );
         return result === PermissionsAndroid.RESULTS.GRANTED;
       }
-    } catch {
+    } catch (err) {
+      console.warn("Permission error:", err);
       return false;
     }
   }, []);
@@ -432,17 +467,30 @@ export default function BreathalyserScreen() {
 
   const startDeviceScan = useCallback(async () => {
     if (scanActiveRef.current) return;
+    
     const allowed = await requestPermissions();
     if (!allowed) {
       showToast("Bluetooth permission is required to scan.");
       return;
     }
+
+    // Reset state before scanning
     scanActiveRef.current = true;
+    hasAutoAttemptedRef.current = true; // 🔧 FIX #8: Prevent auto-reconnect race
     setFoundDevices([]);
     setPhase("scanning_devices");
-    breathalyser.scan();
+    
+    // Start the scan
+    try {
+      breathalyser.scan();
+    } catch (e) {
+      console.error("Scan failed to start", e);
+      scanActiveRef.current = false;
+      setPhase("disconnected");
+      showToast("Failed to start scan.");
+    }
 
-    // Auto-stop scan UI after 10s (breathalyser.ts handles BLE timeout)
+    // Auto-stop scan UI after 10s if no device found
     setTimeout(() => {
       if (scanActiveRef.current) {
         scanActiveRef.current = false;
@@ -457,10 +505,10 @@ export default function BreathalyserScreen() {
     if (hasAutoAttemptedRef.current) return;
     hasAutoAttemptedRef.current = true;
 
-    autoConnectOnMount().catch(() => {
-      // No saved device or connect failed — start scanning automatically
-      startDeviceScan();
-    });
+    // Disabled auto-connect as per request
+    // autoConnectOnMount().catch(() => {
+    //   startDeviceScan();
+    // });
   }, []);
 
   // ─── Connect to a device ──────────────────────────────────────────────────────
@@ -469,61 +517,54 @@ export default function BreathalyserScreen() {
     async (device: ScannedDevice) => {
       if (connectingId) return;
       setConnectingId(device.id);
+      showToast("Connecting..."); // 🔧 Feedback
+      
       try {
+        await breathalyser.stopScan(); // 🔧 FIX #1: Stop scan before connect
         await breathalyser.connect(device);
-        // phase transition handled in BLE listener on "connected" status
+        // Phase transition and auto-read are handled in the BLE listener
       } catch (err: any) {
         setConnectingId(null);
         if (err?.message === "Connection timed out") {
-          showToast("Connection timed out. Move closer to the device and try again.");
+          showToast("Sorry, couldn't connect. Try again.");
+        } else {
+          showToast("Connection failed.");
         }
-        // Other BLE internal errors are swallowed — they don't surface useful info to users
       }
     },
     [connectingId, showToast]
   );
 
   // ─── Trigger reading ─────────────────────────────────────────────────────────
+  // 🔧 UPDATED: Direct sendCommand with instant UI feedback and proper error handling
 
   const handleStartReading = useCallback(async () => {
     if (phase !== "ready") return;
+    
+    // 1. INSTANT FEEDBACK: Update UI immediately before any BLE call
+    setPhase("scanning_bac");
+    startScanAnim();
 
     try {
-      // getReading handles sending SCAN, waiting for STATUS:SCANNING, then BAC
-      // Phase transitions are driven by the BLE event listener above (real-time)
-      // so we only need to handle the error case here
-      await getReading();
-      // Success: phase is already set to "result" by the BLE listener
-    } catch (err) {
+      // 2. Send SCAN command directly
+      await breathalyser.sendCommand("SCAN");
+      
+    } catch (err: any) {
+      // Revert UI if command fails
       stopScanAnim();
       setPhase("ready");
-
-      if (err instanceof ReadingError) {
-        switch (err.code) {
-          case "DEVICE_NOT_CONNECTED":
-            showToast("Device disconnected. Please reconnect.");
-            setPhase("disconnected");
-            break;
-          case "COMMAND_NOT_ACKNOWLEDGED":
-            showToast("Device did not respond. Ensure it is ready and try again.");
-            break;
-          case "READING_TIMEOUT":
-            showToast("Reading timed out. Please try again.");
-            break;
-          case "INVALID_BAC_FORMAT":
-            showToast("Received an invalid reading. Please try again.");
-            break;
-          case "COMMAND_SEND_FAILED":
-            showToast("Could not reach the device. Try reconnecting.");
-            break;
-          default:
-            showToast("An unexpected error occurred. Please try again.");
-        }
+      
+      // Show specific error based on what failed
+      if (err?.message === 'DEVICE_NOT_CONNECTED') {
+        showToast("Device disconnected. Please reconnect.");
+        setPhase("disconnected");
+      } else if (err?.message === 'COMMAND_SEND_FAILED') {
+        showToast("Failed to send command. Ensure device is ready and try again.");
       } else {
         showToast("An unexpected error occurred. Please try again.");
       }
     }
-  }, [phase, stopScanAnim, showToast]);
+  }, [phase, startScanAnim, stopScanAnim, showToast]);
 
   // ─── Disconnect ──────────────────────────────────────────────────────────────
 
@@ -544,7 +585,12 @@ export default function BreathalyserScreen() {
   const isConnected = !["disconnected", "scanning_devices", "connecting"].includes(phase);
 
   const dotColor = (() => {
-    if (phase === "warmup") return "#FFA500";
+    if (phase === "warmup") {
+        // Sync header dot with warmup ring logic
+        if (warmupRemaining <= 5) return "#FF4C4C";
+        if (warmupRemaining <= 10) return "#FFA500";
+        return "#1DB954";
+    }
     if (phase === "ready" || phase === "result") return "#1DB954";
     if (phase === "scanning_bac") return "#3B8BEB";
     return "#555";
@@ -598,7 +644,7 @@ export default function BreathalyserScreen() {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* ── DISCONNECTED ──────────────────────────────────────────────────── */}
+        {/* ── DISCONNECTED / SCANNING / CONNECTING ──────────────────────────── */}
         {(phase === "disconnected" || phase === "scanning_devices" || phase === "connecting") && (
           <View style={styles.section}>
             <TouchableOpacity
@@ -660,6 +706,7 @@ export default function BreathalyserScreen() {
               <TouchableOpacity
                 style={styles.readyBtn}
                 onPress={handleStartReading}
+                disabled={phase !== 'ready'}
                 activeOpacity={0.8}
               >
                 <Text style={styles.readyBtnText}>START TEST</Text>
@@ -1012,6 +1059,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 40,
     paddingVertical: 15,
     borderRadius: 28,
+  },
+  readyBtnDisabled: {
+    backgroundColor: "#555",
+    opacity: 0.5,
   },
   readyBtnText: {
     color: "#000",

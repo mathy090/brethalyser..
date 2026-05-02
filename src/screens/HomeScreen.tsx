@@ -1,7 +1,4 @@
-/**
- * src/screens/HomeScreen.tsx
- * Home screen - Driver management & Uploads (Bluetooth removed)
- */
+
 
 import React, { useState, useCallback } from "react";
 import {
@@ -9,20 +6,23 @@ import {
   Image, TouchableOpacity, ScrollView,
 } from "react-native";
 import { SafeAreaView }     from "react-native-safe-area-context";
-// Ensure this path is correct for your project structure
 import { useOfficer }       from "../context/OfficerContext";
 import { useNetworkStatus } from "../helpers/network";
 import { useLiveClock }     from "../hooks/useLiveClock";
 import { type DriverData }  from "../helpers/constants";
 import DriverCard           from "../features/home/DriverCard";
+import { useBreathalyser }  from "../context/BreathalyserContext";
+import { calculateFine }    from "../helpers/fineCalculator"; // 🔧 Import Fine Logic
 
 export default function HomeScreen() {
-  // ✅ Safety: If officer context is missing, we handle it gracefully
   const officerContext = useOfficer();
   const officer = officerContext?.officer; 
   
   const { isConnected }      = useNetworkStatus();
   const { date, time }       = useLiveClock();
+  
+  // Get latest BAC result from context
+  const { result: bacResult } = useBreathalyser();
 
   const [driverValid, setDriverValid] = useState(false);
 
@@ -32,10 +32,12 @@ export default function HomeScreen() {
     },
     []
   );
-
   const handleUpload = useCallback(() => {
     console.log("Upload pressed", officer ? "Logged in" : "Guest");
   }, [officer]);
+
+  // Calculate Fine if result exists
+  const fineInfo = bacResult ? calculateFine(parseFloat(bacResult.bacPercent)) : null;
 
   return (
     <SafeAreaView style={s.root} edges={["top"]}>
@@ -82,6 +84,52 @@ export default function HomeScreen() {
         {/* ── Driver card ───────────────────────────────────────────────── */}
         <DriverCard onDataChange={handleDriverChange} />
 
+        {/* ── BAC Result Summary (Auto-updates after scan) ──────────────── */}
+        {bacResult && (
+          <View style={s.bacSection}>
+            <Text style={s.sectionLabel}>LATEST READING</Text>
+            <View style={s.bacRow}>
+              {/* 1. Dot Indicator */}
+              <View style={[s.bacDot, { backgroundColor: bacResult.overLimit ? "#FF4C4C" : "#1DB954" }]} />
+              
+              {/* 2. BAC Percentage */}
+              <Text style={[s.bacValue, { color: bacResult.overLimit ? "#FF4C4C" : "#1DB954" }]}>
+                {bacResult.bacPercent}
+              </Text>
+              
+              {/* 3. Time */}
+              <Text style={s.bacTime}>
+                {new Date(bacResult.timestamp).toLocaleTimeString("en-GB", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </Text>
+
+              {/* 🔧 4. Estimated Fine (Inserted between Time and Status) */}
+              {fineInfo && (
+                <View style={s.fineContainer}>
+                  <Text style={s.fineLabel}>Fine:</Text>
+                  <Text style={[s.fineValue, { color: bacResult.overLimit ? "#FF4C4C" : "#1DB954" }]}>
+                    ${fineInfo.amount}
+                  </Text>
+                </View>
+              )}
+              
+              {/* 5. Status (PASS/FAIL) */}
+              <Text style={[s.bacStatus, { color: bacResult.overLimit ? "#FF4C4C" : "#1DB954" }]}>
+                {bacResult.overLimit ? "OVER LIMIT" : "PASS"}
+              </Text>
+            </View>
+            
+            {/* Optional: Show fine description below if over limit */}
+            {fineInfo && bacResult.overLimit && (
+              <Text style={s.fineDescription}>
+                Category: {fineInfo.description}
+              </Text>
+            )}
+          </View>
+        )}
+
         {/* ── Buttons ───────────────────────────────────────────────────── */}
         <View style={s.btnRow}>
           <TouchableOpacity
@@ -126,6 +174,24 @@ const s = StyleSheet.create({
   statusText:      { fontSize: 10, fontWeight: "700" },
   scroll:          { flex: 1 },
   content:         { padding: 12, paddingBottom: 40 },
+  
+  // ── BAC Section Styles ──────────────────────────────────────────────────
+  bacSection:      { marginTop: 16, marginBottom: 8 },
+  sectionLabel:    { color: "#444", fontSize: 10, fontWeight: "700", letterSpacing: 1.5, marginBottom: 8, marginLeft: 4 },
+  bacRow:          { flexDirection: "row", alignItems: "center", backgroundColor: "#1a1a1a", paddingVertical: 12, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: "rgba(255,255,255,0.05)" },
+  bacDot:          { width: 8, height: 8, borderRadius: 4, marginRight: 10 },
+  bacValue:        { width: 50, fontSize: 16, fontWeight: "800", letterSpacing: 0.5 },
+  bacTime:         { color: "#666", fontSize: 12, fontWeight: "500", marginRight: 8, fontVariant: ["tabular-nums"] },
+  
+  // 🔧 Fine Styles
+  fineContainer:   { marginRight: 8, alignItems: "flex-start" },
+  fineLabel:       { color: "#888", fontSize: 9, fontWeight: "600" },
+  fineValue:       { fontSize: 14, fontWeight: "800" },
+  
+  bacStatus:       { fontSize: 11, fontWeight: "800", letterSpacing: 0.5, width: 70, textAlign: "right" },
+  fineDescription: { color: "#FFA500", fontSize: 10, marginTop: 4, marginLeft: 22, fontStyle: "italic" },
+
+  // ── Button Styles ───────────────────────────────────────────────────────
   btnRow:           { flexDirection: "row", gap: 12, marginBottom: 8, marginTop: 10 },
   uploadBtn:        { flex: 1, paddingVertical: 16, borderRadius: 14, alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: "#1DB954" },
   uploadBtnOff:     { borderColor: "#2a2a2a" },
