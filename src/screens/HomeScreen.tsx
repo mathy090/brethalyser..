@@ -37,7 +37,7 @@ export default function HomeScreen() {
 
   // Capture driver data & photo from DriverCard (same as device.tsx)
   const handleDriverChange = useCallback(
-    (data: DriverData, isValid: boolean, uri: string | null) => {
+    ( DriverData, isValid: boolean, uri: string | null) => {
       setDriverValid(isValid);
       setDriverData(data);
       setPhotoUri(uri);
@@ -46,113 +46,113 @@ export default function HomeScreen() {
   );
 
   // Upload Handler - SAME PATTERN AS device.tsx uploadAvatarToSupabase
- // Upload Handler - SAME PATTERN AS device.tsx uploadAvatarToSupabase
-const handleUpload = useCallback(async () => {
-  // ✅ SNAPSHOT STATE LOCK (prevents mid-change bugs)
-  const snapshot = {
-    driverValid,
-    driverData,
-    photoUri,
-    bacResult,
-  };
+  const handleUpload = useCallback(async () => {
+    // ✅ SNAPSHOT STATE LOCK (prevents mid-change bugs)
+    const snapshot = {
+      driverValid,
+      driverData,
+      photoUri,
+      bacResult,
+    };
 
-  if (!snapshot.driverValid || !snapshot.bacResult || !snapshot.photoUri || !snapshot.driverData) {
-    Alert.alert("Missing Info", "Complete all required fields first");
-    return;
-  }
-
-  const cleanBackendUrl = BACKEND_URL?.trim();
-  if (!cleanBackendUrl || !cleanBackendUrl.startsWith("http")) {
-    Alert.alert("Config Error", "Invalid BACKEND_URL");
-    return;
-  }
-
-  setIsUploading(true);
-
-  try {
-    const formData = new FormData();
-
-    // Driver data (same as device.tsx)
-    formData.append("driverData", JSON.stringify(snapshot.driverData));
-
-    // BAC data
-    const bacValue = parseFloat(snapshot.bacResult.bacPercent.replace("%", ""));
-    const fineInfo = calculateFine(bacValue);
-    formData.append(
-      "bacData",
-      JSON.stringify({
-        bac: bacValue.toFixed(2),
-        timestamp: snapshot.bacResult.timestamp,
-        fine: fineInfo?.amount || 0,
-        overLimit: snapshot.bacResult.overLimit,
-      })
-    );
-
-    // ✅ PHOTO UPLOAD - SAME PATTERN AS device.tsx (React Native compatible)
-    // @ts-ignore - React Native FormData accepts this format
-    formData.append("photo", {
-      uri: snapshot.photoUri,           // file:// URI from DriverCard
-      type: "image/jpeg",               // or detect from URI
-      name: "driver-id.jpg",            // filename backend expects
-    });
-
-    const uploadUrl = `${cleanBackendUrl}/api/upload`;
-    console.log("📤 Uploading to:", uploadUrl);
-
-    // ✅ DO NOT set Content-Type header - let fetch set multipart boundary
-    // 🔧 20-SECOND TIMEOUT (matches Arduino scan duration)
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20_000); // 20 seconds
-
-    const response = await fetch(uploadUrl, {
-      method: "POST",
-      body: formData,
-      signal: controller.signal,
-      headers: {
-        Accept: "application/json",  // ✅ Only set Accept
-        // ❌ DO NOT set "Content-Type": "multipart/form-data"
-      },
-    });
-
-    clearTimeout(timeout); // ✅ Clear timeout after response
-    console.log("📥 Response status:", response.status);
-
-    // ✅ Response safety (same as device.tsx)
-    const contentType = response.headers.get("content-type");
-    if (!contentType?.includes("application/json")) {
-      throw new Error("Server did not return JSON");
+    if (!snapshot.driverValid || !snapshot.bacResult || !snapshot.photoUri || !snapshot.driverData) {
+      Alert.alert("Missing Info", "Complete all required fields first");
+      return;
     }
 
-    const result = await response.json();
-
-    if (!response.ok) {
-      throw new Error(result?.error || `Upload failed (${response.status})`);
+    const cleanBackendUrl = BACKEND_URL?.trim();
+    if (!cleanBackendUrl || !cleanBackendUrl.startsWith("http")) {
+      Alert.alert("Config Error", "Invalid BACKEND_URL");
+      return;
     }
 
-    Alert.alert(
-      "Upload Successful",
-      `Driver: ${snapshot.driverData.firstName} ${snapshot.driverData.surname}\nBAC: ${snapshot.bacResult.bacPercent}`
-    );
-    
-  } catch (err: any) {
-    console.error("❌ Upload error:", err);
+    setIsUploading(true);
 
-    // ✅ Improved error handling (same as device.tsx)
-    let msg = err.message || "Unknown error";
+    try {
+      const formData = new FormData();
 
-    if (err.name === "AbortError") {
-      msg = "Upload timed out (20s limit). Check connection and try again.";
-    } else if (err.message?.includes("Network request failed")) {
-      msg = "Network issue. Check:\n1. Backend is running\n2. BACKEND_URL is correct\n3. Device has internet";
-    } else if (err.message?.includes("Server did not return JSON")) {
-      msg = "Server returned invalid response format";
+      // Driver data (same as device.tsx)
+      formData.append("driverData", JSON.stringify(snapshot.driverData));
+
+      // BAC data
+      const bacValue = parseFloat(snapshot.bacResult.bacPercent.replace("%", ""));
+      const fineInfo = calculateFine(bacValue);
+      formData.append(
+        "bacData",
+        JSON.stringify({
+          bac: bacValue.toFixed(2),
+          timestamp: snapshot.bacResult.timestamp,
+          fine: fineInfo?.amount || 0,
+          overLimit: snapshot.bacResult.overLimit,
+        })
+      );
+
+      // ✅ PHOTO UPLOAD - SAME PATTERN AS device.tsx (React Native compatible)
+      // @ts-ignore - React Native FormData accepts this format
+      formData.append("photo", {
+        uri: snapshot.photoUri,           // file:// URI from DriverCard
+        type: "image/jpeg",               // or detect from URI
+        name: "driver-id.jpg",            // filename backend expects
+      });
+
+      const uploadUrl = `${cleanBackendUrl}/api/upload`;
+      console.log("📤 Uploading to:", uploadUrl);
+
+      // ✅ DO NOT set Content-Type header - let fetch set multipart boundary
+      // 🔧 20-SECOND TIMEOUT (matches Arduino scan duration)
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20_000); // 20 seconds
+
+      const response = await fetch(uploadUrl, {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+        headers: {
+          Accept: "application/json",  // ✅ Only set Accept
+          // ❌ DO NOT set "Content-Type": "multipart/form-data"
+        },
+      });
+
+      clearTimeout(timeout); // ✅ Clear timeout after response
+      console.log("📥 Response status:", response.status);
+
+      // ✅ Response safety (same as device.tsx)
+      const contentType = response.headers.get("content-type");
+      if (!contentType?.includes("application/json")) {
+        throw new Error("Server did not return JSON");
+      }
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result?.error || `Upload failed (${response.status})`);
+      }
+
+      Alert.alert(
+        "Upload Successful",
+        `Driver: ${snapshot.driverData.firstName} ${snapshot.driverData.surname}\nBAC: ${snapshot.bacResult.bacPercent}`
+      );
+      
+    } catch (err: any) {
+      console.error("❌ Upload error:", err);
+
+      // ✅ Improved error handling (same as device.tsx)
+      let msg = err.message || "Unknown error";
+
+      if (err.name === "AbortError") {
+        msg = "Upload timed out (20s limit). Check connection and try again.";
+      } else if (err.message?.includes("Network request failed")) {
+        msg = "Network issue. Check:\n1. Backend is running\n2. BACKEND_URL is correct\n3. Device has internet";
+      } else if (err.message?.includes("Server did not return JSON")) {
+        msg = "Server returned invalid response format";
+      }
+
+      Alert.alert("Upload Failed", msg);
+    } finally {
+      setIsUploading(false);
     }
+  }, [driverValid, bacResult, photoUri, driverData]);
 
-    Alert.alert("Upload Failed", msg);
-  } finally {
-    setIsUploading(false);
-  }
-}, [driverValid, bacResult, photoUri, driverData]);
   // Calculate fine for UI display
   const fineInfo = bacResult ? calculateFine(parseFloat(bacResult.bacPercent.replace("%", ""))) : null;
 
