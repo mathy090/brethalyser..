@@ -42,7 +42,6 @@ app.get("/health", (_req, res) => {
 });
 
 // ─── Local upload dir (dev only) ─────────────────────────────────────────────
-// FIX: was env.NODE_ENV (doesn't exist in env.ts) — use process.env directly
 if (process.env.NODE_ENV === "development") {
   const uploadsDir = path.join(process.cwd(), "uploads");
   app.use("/uploads", express.static(uploadsDir));
@@ -65,7 +64,6 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     return res.status(400).json({ error: err.message });
   }
 
-  // FIX: was env.NODE_ENV (doesn't exist in env.ts) — use process.env directly
   res.status(500).json({
     error: process.env.NODE_ENV === "production" ? "Internal server error" : err.message,
   });
@@ -79,7 +77,6 @@ async function startServer() {
     initSocket(httpServer);
     console.log("✅ Socket initialized");
 
-    // FIX: was env.NODE_ENV (doesn't exist in env.ts) — use process.env directly
     if (process.env.NODE_ENV === "development") {
       const uploadPath = path.join(process.cwd(), "uploads", "driver-photos");
       if (!fs.existsSync(uploadPath)) {
@@ -90,7 +87,6 @@ async function startServer() {
 
     httpServer.listen(env.PORT, "0.0.0.0", () => {
       console.log(`🚀 Server running on port ${env.PORT}`);
-      // FIX: was env.API_BASE_URL (doesn't exist in env.ts) — use process.env directly
       console.log(`🌐 ${process.env.API_BASE_URL ?? `http://0.0.0.0:${env.PORT}`}`);
       console.log(`☁️  Supabase: ${process.env.SUPABASE_URL ? "configured" : "NOT CONFIGURED"}`);
     });
@@ -104,17 +100,7 @@ async function startServer() {
 process.on("uncaughtException",   (err)    => console.error("❌ Uncaught Exception:", err));
 process.on("unhandledRejection",  (reason) => console.error("❌ Unhandled Rejection:", reason));
 
-process.on("SIGTERM", () => {
-  console.log("🔄 SIGTERM received - starting graceful shutdown...");
-  httpServer.close(() => {
-    console.log("✅ HTTP server closed");
-    process.exit(0);
-  });
-  setTimeout(() => {
-    console.error("❌ Forced shutdown after timeout");
-    process.exit(1);
-  }, 30_000);
-});
+// 🔥 SIGTERM handler REMOVED - let Render/Bun handle restart silently
 
 startServer();
 
