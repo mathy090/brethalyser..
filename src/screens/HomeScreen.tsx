@@ -1,7 +1,6 @@
 /**
  * src/screens/HomeScreen.tsx
  * Home screen - Driver management, BAC Result Display & Uploads
- * Upload logic follows same pattern as app/auth/device.tsx
  */
 
 import React, { useState, useCallback } from "react";
@@ -10,8 +9,7 @@ import {
   Image, TouchableOpacity, ScrollView, Alert, ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-// 🔧 Import backend URL using react-native-dotenv (same as LoginScreen)
-import { BACKEND_URL } from '@env';
+import { BACKEND_URL } from "@env";
 import { useOfficer } from "../context/OfficerContext";
 import { useNetworkStatus } from "../helpers/network";
 import { useLiveClock } from "../hooks/useLiveClock";
@@ -21,23 +19,22 @@ import { useBreathalyser } from "../context/BreathalyserContext";
 import { calculateFine } from "../helpers/fineCalculator";
 
 export default function HomeScreen() {
-  // ✅ ALL HOOKS CALLED UNCONDITIONALLY AT TOP
   const officerContext = useOfficer();
   const officer = officerContext?.officer ?? null;
-  
+
   const { isConnected } = useNetworkStatus();
   const { date, time } = useLiveClock();
   const { result: bacResult } = useBreathalyser();
 
-  // Local UI State
   const [driverValid, setDriverValid] = useState(false);
   const [driverData, setDriverData] = useState<DriverData | null>(null);
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
 
-  // Capture driver data & photo from DriverCard (same as device.tsx)
+  // FIX: parameter was named 'DriverData' (the type), then 'data' was referenced
+  // which didn't exist — caused instant crash on render
   const handleDriverChange = useCallback(
-    ( DriverData, isValid: boolean, uri: string | null) => {
+    (data: DriverData, isValid: boolean, uri: string | null) => {
       setDriverValid(isValid);
       setDriverData(data);
       setPhotoUri(uri);
@@ -45,15 +42,8 @@ export default function HomeScreen() {
     []
   );
 
-  // Upload Handler - SAME PATTERN AS device.tsx uploadAvatarToSupabase
   const handleUpload = useCallback(async () => {
-    // ✅ SNAPSHOT STATE LOCK (prevents mid-change bugs)
-    const snapshot = {
-      driverValid,
-      driverData,
-      photoUri,
-      bacResult,
-    };
+    const snapshot = { driverValid, driverData, photoUri, bacResult };
 
     if (!snapshot.driverValid || !snapshot.bacResult || !snapshot.photoUri || !snapshot.driverData) {
       Alert.alert("Missing Info", "Complete all required fields first");
@@ -71,10 +61,8 @@ export default function HomeScreen() {
     try {
       const formData = new FormData();
 
-      // Driver data (same as device.tsx)
       formData.append("driverData", JSON.stringify(snapshot.driverData));
 
-      // BAC data
       const bacValue = parseFloat(snapshot.bacResult.bacPercent.replace("%", ""));
       const fineInfo = calculateFine(bacValue);
       formData.append(
@@ -82,41 +70,30 @@ export default function HomeScreen() {
         JSON.stringify({
           bac: bacValue.toFixed(2),
           timestamp: snapshot.bacResult.timestamp,
-          fine: fineInfo?.amount || 0,
+          fine: fineInfo?.amount ?? 0,
           overLimit: snapshot.bacResult.overLimit,
         })
       );
 
-      // ✅ PHOTO UPLOAD - SAME PATTERN AS device.tsx (React Native compatible)
-      // @ts-ignore - React Native FormData accepts this format
+      // @ts-ignore — React Native FormData accepts this object format
       formData.append("photo", {
-        uri: snapshot.photoUri,           // file:// URI from DriverCard
-        type: "image/jpeg",               // or detect from URI
-        name: "driver-id.jpg",            // filename backend expects
+        uri: snapshot.photoUri,
+        type: "image/jpeg",
+        name: "driver-id.jpg",
       });
 
-      const uploadUrl = `${cleanBackendUrl}/api/upload`;
-      console.log("📤 Uploading to:", uploadUrl);
-
-      // ✅ DO NOT set Content-Type header - let fetch set multipart boundary
-      // 🔧 20-SECOND TIMEOUT (matches Arduino scan duration)
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 20_000); // 20 seconds
+      const timeout = setTimeout(() => controller.abort(), 20_000);
 
-      const response = await fetch(uploadUrl, {
+      const response = await fetch(`${cleanBackendUrl}/api/upload`, {
         method: "POST",
         body: formData,
         signal: controller.signal,
-        headers: {
-          Accept: "application/json",  // ✅ Only set Accept
-          // ❌ DO NOT set "Content-Type": "multipart/form-data"
-        },
+        headers: { Accept: "application/json" },
       });
 
-      clearTimeout(timeout); // ✅ Clear timeout after response
-      console.log("📥 Response status:", response.status);
+      clearTimeout(timeout);
 
-      // ✅ Response safety (same as device.tsx)
       const contentType = response.headers.get("content-type");
       if (!contentType?.includes("application/json")) {
         throw new Error("Server did not return JSON");
@@ -125,43 +102,37 @@ export default function HomeScreen() {
       const result = await response.json();
 
       if (!response.ok) {
-        throw new Error(result?.error || `Upload failed (${response.status})`);
+        throw new Error(result?.error ?? `Upload failed (${response.status})`);
       }
 
       Alert.alert(
         "Upload Successful",
         `Driver: ${snapshot.driverData.firstName} ${snapshot.driverData.surname}\nBAC: ${snapshot.bacResult.bacPercent}`
       );
-      
     } catch (err: any) {
-      console.error("❌ Upload error:", err);
-
-      // ✅ Improved error handling (same as device.tsx)
-      let msg = err.message || "Unknown error";
-
+      let msg = err.message ?? "Unknown error";
       if (err.name === "AbortError") {
-        msg = "Upload timed out (20s limit). Check connection and try again.";
+        msg = "Upload timed out (20s). Check connection and try again.";
       } else if (err.message?.includes("Network request failed")) {
-        msg = "Network issue. Check:\n1. Backend is running\n2. BACKEND_URL is correct\n3. Device has internet";
+        msg = "Network issue. Check BACKEND_URL and internet connection.";
       } else if (err.message?.includes("Server did not return JSON")) {
-        msg = "Server returned invalid response format";
+        msg = "Server returned an invalid response.";
       }
-
       Alert.alert("Upload Failed", msg);
     } finally {
       setIsUploading(false);
     }
   }, [driverValid, bacResult, photoUri, driverData]);
 
-  // Calculate fine for UI display
-  const fineInfo = bacResult ? calculateFine(parseFloat(bacResult.bacPercent.replace("%", ""))) : null;
+  const fineInfo = bacResult
+    ? calculateFine(parseFloat(bacResult.bacPercent.replace("%", "")))
+    : null;
 
-  // ✅ RENDER LOGIC BELOW ALL HOOKS
   return (
     <SafeAreaView style={s.root} edges={["top"]}>
       <StatusBar barStyle="light-content" backgroundColor="#121212" />
 
-      {/* ── Top bar ───────────────────────────────────────────────────── */}
+      {/* ── Top bar ─────────────────────────────────────────────────── */}
       <View style={s.topBar}>
         <View style={s.logoWrap}>
           <Image source={require("../../assets/background.png")} style={s.logo} />
@@ -190,31 +161,24 @@ export default function HomeScreen() {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        {/* ── Driver card ───────────────────────────────────────────────── */}
+        {/* ── Driver card ──────────────────────────────────────────── */}
         <DriverCard onDataChange={handleDriverChange} />
 
-        {/* ── BAC Result Summary ──────────────────────────────────────── */}
+        {/* ── BAC Result Summary ───────────────────────────────────── */}
         {bacResult && (
           <View style={s.bacSection}>
             <Text style={s.sectionLabel}>LATEST READING</Text>
             <View style={s.bacRow}>
-              {/* Dot Indicator */}
               <View style={[s.bacDot, { backgroundColor: bacResult.overLimit ? "#FF4C4C" : "#1DB954" }]} />
-              
-              {/* BAC Percentage */}
               <Text style={[s.bacValue, { color: bacResult.overLimit ? "#FF4C4C" : "#1DB954" }]}>
                 {bacResult.bacPercent}
               </Text>
-              
-              {/* Time */}
               <Text style={s.bacTime}>
                 {new Date(bacResult.timestamp).toLocaleTimeString("en-GB", {
                   hour: "2-digit",
                   minute: "2-digit",
                 })}
               </Text>
-
-              {/* Fine Calculation */}
               {fineInfo && (
                 <View style={s.fineContainer}>
                   <Text style={s.fineLabel}>Fine:</Text>
@@ -223,24 +187,20 @@ export default function HomeScreen() {
                   </Text>
                 </View>
               )}
-              
-              {/* Status */}
               <Text style={[s.bacStatus, { color: bacResult.overLimit ? "#FF4C4C" : "#1DB954" }]}>
                 {bacResult.overLimit ? "OVER LIMIT" : "PASS"}
               </Text>
             </View>
-            
-            {/* Fine Description (if over limit) */}
             {fineInfo && bacResult.overLimit && (
               <Text style={s.fineDescription}>Category: {fineInfo.description}</Text>
             )}
           </View>
         )}
 
-        {/* ── Upload Button ───────────────────────────────────────────── */}
+        {/* ── Upload Button ────────────────────────────────────────── */}
         <View style={s.btnRow}>
           <TouchableOpacity
-            style={[s.uploadBtn, (!driverValid || isUploading) ? s.uploadBtnOff : null]}
+            style={[s.uploadBtn, (!driverValid || isUploading) && s.uploadBtnOff]}
             onPress={handleUpload}
             disabled={!driverValid || isUploading}
             activeOpacity={0.85}
@@ -248,7 +208,7 @@ export default function HomeScreen() {
             {isUploading ? (
               <ActivityIndicator color="#1DB954" />
             ) : (
-              <Text style={[s.uploadBtnText, !driverValid ? s.uploadBtnTextOff : null]}>
+              <Text style={[s.uploadBtnText, !driverValid && s.uploadBtnTextOff]}>
                 Upload Data
               </Text>
             )}
@@ -267,7 +227,6 @@ export default function HomeScreen() {
   );
 }
 
-// ── Styles ───────────────────────────────────────────────────────────────────
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#121212" },
   topBar: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.05)" },
@@ -284,23 +243,17 @@ const s = StyleSheet.create({
   statusText: { fontSize: 10, fontWeight: "700" },
   scroll: { flex: 1 },
   content: { padding: 12, paddingBottom: 40 },
-  
-  // BAC Row Styles
   bacSection: { marginTop: 16, marginBottom: 8 },
   sectionLabel: { color: "#444", fontSize: 10, fontWeight: "700", letterSpacing: 1.5, marginBottom: 8, marginLeft: 4 },
   bacRow: { flexDirection: "row", alignItems: "center", backgroundColor: "#1a1a1a", paddingVertical: 12, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: "rgba(255,255,255,0.05)" },
   bacDot: { width: 8, height: 8, borderRadius: 4, marginRight: 10 },
   bacValue: { width: 50, fontSize: 16, fontWeight: "800", letterSpacing: 0.5 },
   bacTime: { color: "#666", fontSize: 12, fontWeight: "500", marginRight: 8, fontVariant: ["tabular-nums"] },
-  
-  // Fine Styles
   fineContainer: { marginRight: 8, alignItems: "flex-start" },
   fineLabel: { color: "#888", fontSize: 9, fontWeight: "600" },
   fineValue: { fontSize: 14, fontWeight: "800" },
   bacStatus: { fontSize: 11, fontWeight: "800", letterSpacing: 0.5, width: 70, textAlign: "right" },
   fineDescription: { color: "#FFA500", fontSize: 10, marginTop: 4, marginLeft: 22, fontStyle: "italic" },
-
-  // Button Styles
   btnRow: { flexDirection: "row", gap: 12, marginBottom: 8, marginTop: 10 },
   uploadBtn: { flex: 1, paddingVertical: 16, borderRadius: 14, alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: "#1DB954" },
   uploadBtnOff: { borderColor: "#2a2a2a" },
