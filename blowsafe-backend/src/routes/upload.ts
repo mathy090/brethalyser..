@@ -32,8 +32,8 @@ function getSupabase() {
   return _supabase;
 }
 
-// ─── Multer config (memory storage — no disk writes) ────────────────────────
-const upload = multer({
+// ─── Multer config (memory storage) ─────────────────────────────────────────
+const _multer = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
@@ -46,6 +46,33 @@ const upload = multer({
   },
 });
 
+/**
+ * FIX: multer 2.x + Bun — multer calls req.on('aborted') which behaves
+ * differently under Bun's HTTP server. When the client disconnects mid-upload
+ * multer throws "Request aborted" which escapes Express's error handler and
+ * crashes the process. This wrapper intercepts that before it propagates.
+ */
+function multerSingle(fieldName: string) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    _multer.single(fieldName)(req, res, (err: any) => {
+      if (!err) {
+        next();
+        return;
+      }
+
+      // Client disconnected mid-upload — connection is already gone,
+      // calling res.json() here would throw a second error. Just return.
+      if (err.message === "Request aborted" || err.message === "Request error") {
+        console.warn("[Upload] Client disconnected mid-upload — ignored");
+        return;
+      }
+
+      // All other multer errors (file too large, wrong type, etc.) — pass on
+      next(err);
+    });
+  };
+}
+
 // ─── Validation Middleware ───────────────────────────────────────────────────
 const validateUpload = (req: Request, res: Response, next: NextFunction): void => {
   const { driverData, bacData } = req.body;
@@ -57,7 +84,7 @@ const validateUpload = (req: Request, res: Response, next: NextFunction): void =
 
   try {
     (req as any).parsedDriver = JSON.parse(driverData);
-    (req as any).parsedBac = JSON.parse(bacData);
+    (req as any).parsedBac    = JSON.parse(bacData);
     next();
   } catch {
     res.status(400).json({ error: "Invalid JSON format" });
@@ -67,7 +94,7 @@ const validateUpload = (req: Request, res: Response, next: NextFunction): void =
 // ─── POST /api/upload ────────────────────────────────────────────────────────
 router.post(
   "/upload",
-  upload.single("photo"),
+  multerSingle("photo"),   // ← wrapped version, not _multer.single() directly
   validateUpload,
   async (req: Request, res: Response): Promise<void> => {
     try {
@@ -82,7 +109,7 @@ router.post(
       const supabase = getSupabase();
 
       // ── 1. Upload photo to Supabase Storage ──────────────────────────────
-      const ext = file.mimetype.split("/")[1] ?? "jpg";
+      const ext    = file.mimetype.split("/")[1] ?? "jpg";
       const safeId = parsedDriver.idNumber?.trim().replace(/[^a-zA-Z0-9_-]/g, "_") || "unknown";
       const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
       const filePath = `driver-photos/${safeId}/${unique}-driver.${ext}`;
@@ -179,7 +206,6 @@ router.post(
       console.error("❌ Upload error:", err);
       res.status(500).json({
         error:   "Upload failed",
-        // FIX: was env.NODE_ENV (doesn't exist in env.ts) — use process.env directly
         details: process.env.NODE_ENV === "development" ? err.message : undefined,
       });
     }
