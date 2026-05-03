@@ -1,7 +1,7 @@
 /**
  * src/routes/upload.ts
  * Unauthenticated route for uploading driver ID photo + BAC reading data
- * Uses Supabase Storage + Supabase Database (same pattern as avatarRoutes.js)
+ * Uses Supabase Storage + Supabase Database (Bun-compatible)
  */
 
 import express, { Request, Response, NextFunction } from "express";
@@ -11,7 +11,7 @@ import { env } from "../config/env";
 
 const router = express.Router();
 
-// ─── Supabase Client (lazy singleton - same as avatarRoutes) ─────────────
+// ─── Supabase Client (lazy singleton) ───────────────────────────────────────
 let _supabase: ReturnType<typeof createClient> | null = null;
 
 function getSupabase() {
@@ -33,10 +33,10 @@ function getSupabase() {
   return _supabase;
 }
 
-// ─── Multer config (MEMORY STORAGE - same as avatarRoutes) ──────────────
+// ─── Multer config (MEMORY STORAGE) ─────────────────────────────────────────
 const upload = multer({
-  storage: multer.memoryStorage(), // Store in RAM, not disk
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const allowed = ["image/jpeg", "image/png", "image/webp"];
     if (allowed.includes(file.mimetype)) {
@@ -47,7 +47,7 @@ const upload = multer({
   },
 });
 
-// ─── Validation Middleware ──────────────────────────────────────────────
+// ─── Validation Middleware ──────────────────────────────────────────────────
 const validateUpload = (req: Request, res: Response, next: NextFunction) => {
   const { driverData, bacData } = req.body;
 
@@ -56,32 +56,22 @@ const validateUpload = (req: Request, res: Response, next: NextFunction) => {
   }
 
   try {
-    req.parsedDriver = JSON.parse(driverData);
-    req.parsedBac = JSON.parse(bacData);
+    (req as any).parsedDriver = JSON.parse(driverData);
+    (req as any).parsedBac = JSON.parse(bacData);
     next();
   } catch {
     return res.status(400).json({ error: "Invalid JSON format" });
   }
 };
 
-// Extend request type
-declare global {
-  namespace Express {
-    interface Request {
-      parsedDriver?: any;
-      parsedBac?: any;
-    }
-  }
-}
-
-// ─── POST /api/upload ───────────────────────────────────────────────────
+// ─── POST /api/upload ───────────────────────────────────────────────────────
 router.post(
   "/upload",
   upload.single("photo"),
   validateUpload,
   async (req: Request, res: Response) => {
     try {
-      const { parsedDriver, parsedBac } = req;
+      const { parsedDriver, parsedBac } = req as any;
       const file = req.file;
 
       if (!file) {
@@ -90,7 +80,7 @@ router.post(
 
       const supabase = getSupabase();
 
-      // ── 1. Upload photo to Supabase Storage ───────────────────────────
+      // ── 1. Upload photo to Supabase Storage ───────────────────────────────
       const ext = file.mimetype.split("/")[1] ?? "jpg";
       const safeIdNumber = parsedDriver.idNumber?.trim().replace(/[^a-zA-Z0-9_-]/g, "_") || "unknown";
       const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
@@ -98,11 +88,11 @@ router.post(
 
       console.log(`[Upload] Uploading to Supabase Storage: ${filePath}`);
 
-      const { error: uploadError, data: uploadData } = await supabase.storage
-        .from("driver-photos") // 🔥 Ensure this bucket exists in Supabase Dashboard
+      const { error: uploadError } = await supabase.storage
+        .from("driver-photos")
         .upload(filePath, file.buffer, {
           contentType: file.mimetype,
-          upsert: true, // Overwrite if exists
+          upsert: true,
           cacheControl: "3600",
         });
 
@@ -114,7 +104,7 @@ router.post(
             message: "Supabase 'driver-photos' bucket doesn't exist.",
           });
         }
-        if (uploadError.message.includes("permission") || uploadError.statusCode === 403) {
+        if (uploadError.message.includes("permission") || (uploadError as any).statusCode === 403) {
           return res.status(500).json({
             code: "PERMISSION_DENIED",
             message: "Service role key doesn't have write access to bucket.",
@@ -126,22 +116,17 @@ router.post(
         });
       }
 
-      // ── 2. Build public URL (manual construction - same as avatarRoutes) ─
+      // ── 2. Build public URL ───────────────────────────────────────────────
       const supabaseUrl = process.env.SUPABASE_URL;
       const photoUrl = `${supabaseUrl}/storage/v1/object/public/driver-photos/${filePath}`;
       console.log(`[Upload] Public URL: ${photoUrl}`);
 
-      // ── 3. Insert driver into Supabase Database ────────────────────────
-      // 🔥 Ensure 'drivers' table exists with these columns:
-      // id (uuid, primary key, default gen_random_uuid()),
-      // surname, firstName, dateOfBirth, gender, idNumber (unique),
-      // licenceNumber (unique), licenceCode, issueDate, expiryDate,
-      // photoUrl, created_at (default now())
+      // ── 3. Insert driver into Supabase Database ───────────────────────────
       const { data: driver, error: driverError } = await supabase
         .from("drivers")
         .insert({
           surname: parsedDriver.surname?.trim(),
-          first_name: parsedDriver.firstName?.trim(), // 🔥 snake_case for Supabase
+          first_name: parsedDriver.firstName?.trim(),
           date_of_birth: parsedDriver.dateOfBirth,
           gender: parsedDriver.gender,
           id_number: parsedDriver.idNumber?.trim(),
@@ -156,9 +141,8 @@ router.post(
 
       if (driverError) {
         console.error("[Upload] Driver insert error:", driverError);
-        // Handle duplicate id_number or licence_number
-        if (driverError.code === "23505") { // PostgreSQL unique violation
-          const field = driverError.detail?.includes("id_number") ? "idNumber" : "licenceNumber";
+        if ((driverError as any).code === "23505") {
+          const field = (driverError as any).detail?.includes("id_number") ? "idNumber" : "licenceNumber";
           return res.status(409).json({
             code: "DUPLICATE_ENTRY",
             message: `Driver with this ${field} already exists.`,
@@ -170,12 +154,7 @@ router.post(
         });
       }
 
-      // ── 4. Insert BAC reading into Supabase Database ───────────────────
-      // 🔥 Ensure 'bac_readings' table exists with these columns:
-      // id (uuid, primary key),
-      // driver_id (uuid, foreign key → drivers.id),
-      // bac_value (numeric), over_limit (boolean), fine_amount (numeric),
-      // recorded_at (timestamptz), created_at (default now())
+      // ── 4. Insert BAC reading into Supabase Database ──────────────────────
       const { data: reading, error: readingError } = await supabase
         .from("bac_readings")
         .insert({
@@ -198,10 +177,11 @@ router.post(
 
       console.log(`[Upload] ✅ Saved driver ${driver.id} + reading ${reading.id}`);
 
+      // ✅ FIXED: Proper JSON response syntax
       return res.status(201).json({
         success: true,
         message: "Upload successful",
-         {
+        data: {  // ← This key was missing!
           driverId: driver.id,
           readingId: reading.id,
           photoUrl,
