@@ -1,6 +1,7 @@
 /**
  * src/index.ts
  * BlowSafe API server entry point
+ * Uses Supabase for Storage + Database (no MongoDB)
  */
 
 import express, { Request, Response, NextFunction } from "express";
@@ -12,11 +13,11 @@ import path from "path";
 import fs from "fs";
 
 import { env } from "./config/env";
-import { connectMongo } from "./config/mongo";
+// 🔥 REMOVED: import { connectMongo } from "./config/mongo"; // No longer needed
 import { initSocket } from "./config/socket";
 import authRoutes from "./routes/auth";
 import adminRoutes from "./routes/admin";
-import uploadRoutes from "./routes/upload";
+import uploadRoutes from "./routes/upload"; // ✅ Uses Supabase now
 
 const app = express();
 const httpServer = createServer(app);
@@ -29,6 +30,7 @@ app.use(compression());
 app.use(cors({ origin: "*" }));
 
 // 🔥 IMPORTANT: do NOT parse multipart requests here
+// Multer in upload.ts handles multipart/form-data
 app.use(express.json({ limit: "10mb" }));
 
 // ────────────────────────────────
@@ -36,7 +38,7 @@ app.use(express.json({ limit: "10mb" }));
 // ────────────────────────────────
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
-app.use("/api", uploadRoutes); // → /api/upload
+app.use("/api", uploadRoutes); // ✅ → /api/upload (Supabase-backed)
 
 // Health
 app.get("/", (_req, res) => {
@@ -57,10 +59,13 @@ app.get("/health", (_req, res) => {
 });
 
 // ────────────────────────────────
-// Serve uploads (PRODUCTION + DEV)
+// Serve uploads (DEV ONLY - Supabase Storage for PROD)
 // ────────────────────────────────
-const uploadsDir = path.join(process.cwd(), "uploads");
-app.use("/uploads", express.static(uploadsDir));
+if (env.NODE_ENV === "development") {
+  const uploadsDir = path.join(process.cwd(), "uploads");
+  app.use("/uploads", express.static(uploadsDir));
+  console.log(`📁 Serving local uploads from: ${uploadsDir}`);
+}
 
 // ────────────────────────────────
 // 404 handler
@@ -91,6 +96,14 @@ app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     return res.status(400).json({ error: err.message });
   }
 
+  // Supabase-specific errors
+  if (err.message?.includes("SUPABASE_URL") || err.message?.includes("SUPABASE_SERVICE_ROLE_KEY")) {
+    return res.status(500).json({
+      error: "Server configuration error",
+      details: env.NODE_ENV === "development" ? err.message : undefined,
+    });
+  }
+
   res.status(500).json({
     error: env.NODE_ENV === "production"
       ? "Internal server error"
@@ -103,21 +116,28 @@ app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
 // ────────────────────────────────
 async function startServer() {
   try {
-    await connectMongo();
-    console.log("✅ MongoDB connected");
+    // 🔥 REMOVED: await connectMongo(); // No MongoDB connection needed
+
+    // ✅ Supabase client is lazy-loaded in upload.ts, no global init needed
+    console.log("✅ Supabase client ready (lazy-loaded)");
 
     initSocket(httpServer);
     console.log("✅ Socket initialized");
 
-    // Ensure upload directory exists
-    const uploadPath = path.join(process.cwd(), "uploads", "driver-photos");
-    if (!fs.existsSync(uploadPath)) {
-      fs.mkdirSync(uploadPath, { recursive: true });
+    // 🔥 REMOVED: Local upload directory creation (Supabase Storage handles this)
+    // Only needed if you want local fallback in dev
+    if (env.NODE_ENV === "development") {
+      const uploadPath = path.join(process.cwd(), "uploads", "driver-photos");
+      if (!fs.existsSync(uploadPath)) {
+        fs.mkdirSync(uploadPath, { recursive: true });
+      }
+      console.log(`📁 Local upload directory ready: ${uploadPath}`);
     }
 
     httpServer.listen(env.PORT, "0.0.0.0", () => {
       console.log(`🚀 Server running on port ${env.PORT}`);
       console.log(`🌐 ${env.API_BASE_URL}`);
+      console.log(`☁️  Supabase: ${process.env.SUPABASE_URL ? 'configured' : 'NOT CONFIGURED'}`);
     });
 
   } catch (err) {

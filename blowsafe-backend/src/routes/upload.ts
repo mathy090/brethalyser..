@@ -1,22 +1,36 @@
 /**
  * src/routes/upload.ts
  * Unauthenticated route for uploading driver ID photo + BAC reading data
- * Follows same pattern as avatarRoutes.js
+ * Uses Supabase Storage + Supabase Database (same pattern as avatarRoutes.js)
  */
 
 import express, { Request, Response, NextFunction } from "express";
 import multer from "multer";
-import path from "path";
-import fs from "fs";
-import { Driver, BacReading, IDriver, IBacReading } from "../models/BacUpload";
+import { createClient } from "@supabase/supabase-js";
 import { env } from "../config/env";
 
 const router = express.Router();
 
-// ─── Ensure upload directory exists BEFORE multer uses it ───────────────
-const uploadDir = path.join(process.cwd(), "uploads", "driver-photos");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+// ─── Supabase Client (lazy singleton - same as avatarRoutes) ─────────────
+let _supabase: ReturnType<typeof createClient> | null = null;
+
+function getSupabase() {
+  if (_supabase) return _supabase;
+
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl) throw new Error("SUPABASE_URL env var not set");
+  if (!supabaseKey) throw new Error("SUPABASE_SERVICE_ROLE_KEY env var not set");
+
+  _supabase = createClient(supabaseUrl, supabaseKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+    global: {
+      headers: { apiKey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
+    },
+  });
+
+  return _supabase;
 }
 
 // ─── Multer config (MEMORY STORAGE - same as avatarRoutes) ──────────────
@@ -74,55 +88,128 @@ router.post(
         return res.status(400).json({ error: "Photo is required" });
       }
 
-      // ── Save file to disk (same pattern as avatarRoutes) ──────────────
+      const supabase = getSupabase();
+
+      // ── 1. Upload photo to Supabase Storage ───────────────────────────
       const ext = file.mimetype.split("/")[1] ?? "jpg";
+      const safeIdNumber = parsedDriver.idNumber?.trim().replace(/[^a-zA-Z0-9_-]/g, "_") || "unknown";
       const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
-      const filename = `${unique}-driver.${ext}`;
-      const filePath = path.join(uploadDir, filename);
+      const filePath = `driver-photos/${safeIdNumber}/${unique}-driver.${ext}`;
 
-      // Write buffer to disk
-      fs.writeFileSync(filePath, file.buffer);
+      console.log(`[Upload] Uploading to Supabase Storage: ${filePath}`);
 
-      // Build public URL (same manual construction as avatarRoutes)
-      const photoUrl = `${env.API_BASE_URL}/uploads/driver-photos/${filename}`;
+      const { error: uploadError, data: uploadData } = await supabase.storage
+        .from("driver-photos") // 🔥 Ensure this bucket exists in Supabase Dashboard
+        .upload(filePath, file.buffer, {
+          contentType: file.mimetype,
+          upsert: true, // Overwrite if exists
+          cacheControl: "3600",
+        });
 
-      // ── Save driver to MongoDB ────────────────────────────────────────
-      const driver: IDriver = await Driver.create({
-        ...parsedDriver,
-        photoUrl,
-      });
+      if (uploadError) {
+        console.error("[Upload] Supabase Storage error:", uploadError);
+        if (uploadError.message.includes("Bucket not found")) {
+          return res.status(500).json({
+            code: "BUCKET_NOT_FOUND",
+            message: "Supabase 'driver-photos' bucket doesn't exist.",
+          });
+        }
+        if (uploadError.message.includes("permission") || uploadError.statusCode === 403) {
+          return res.status(500).json({
+            code: "PERMISSION_DENIED",
+            message: "Service role key doesn't have write access to bucket.",
+          });
+        }
+        return res.status(500).json({
+          code: "UPLOAD_FAILED",
+          message: uploadError.message,
+        });
+      }
 
-      // ── Save BAC reading to MongoDB ───────────────────────────────────
-      const reading: IBacReading = await BacReading.create({
-        driver: driver._id,
-        bacValue: Number(parsedBac.bac),
-        overLimit: parsedBac.overLimit,
-        fineAmount: Number(parsedBac.fine),
-        recordedAt: new Date(parsedBac.timestamp),
-      });
+      // ── 2. Build public URL (manual construction - same as avatarRoutes) ─
+      const supabaseUrl = process.env.SUPABASE_URL;
+      const photoUrl = `${supabaseUrl}/storage/v1/object/public/driver-photos/${filePath}`;
+      console.log(`[Upload] Public URL: ${photoUrl}`);
 
-      console.log(`[Upload] ✅ Saved driver ${driver._id} + reading ${reading._id}`);
+      // ── 3. Insert driver into Supabase Database ────────────────────────
+      // 🔥 Ensure 'drivers' table exists with these columns:
+      // id (uuid, primary key, default gen_random_uuid()),
+      // surname, firstName, dateOfBirth, gender, idNumber (unique),
+      // licenceNumber (unique), licenceCode, issueDate, expiryDate,
+      // photoUrl, created_at (default now())
+      const { data: driver, error: driverError } = await supabase
+        .from("drivers")
+        .insert({
+          surname: parsedDriver.surname?.trim(),
+          first_name: parsedDriver.firstName?.trim(), // 🔥 snake_case for Supabase
+          date_of_birth: parsedDriver.dateOfBirth,
+          gender: parsedDriver.gender,
+          id_number: parsedDriver.idNumber?.trim(),
+          licence_number: parsedDriver.licenceNumber?.trim(),
+          licence_code: parsedDriver.licenceCode?.trim(),
+          issue_date: parsedDriver.issueDate,
+          expiry_date: parsedDriver.expiryDate,
+          photo_url: photoUrl,
+        })
+        .select()
+        .single();
+
+      if (driverError) {
+        console.error("[Upload] Driver insert error:", driverError);
+        // Handle duplicate id_number or licence_number
+        if (driverError.code === "23505") { // PostgreSQL unique violation
+          const field = driverError.detail?.includes("id_number") ? "idNumber" : "licenceNumber";
+          return res.status(409).json({
+            code: "DUPLICATE_ENTRY",
+            message: `Driver with this ${field} already exists.`,
+          });
+        }
+        return res.status(500).json({
+          code: "DATABASE_ERROR",
+          message: "Failed to save driver data.",
+        });
+      }
+
+      // ── 4. Insert BAC reading into Supabase Database ───────────────────
+      // 🔥 Ensure 'bac_readings' table exists with these columns:
+      // id (uuid, primary key),
+      // driver_id (uuid, foreign key → drivers.id),
+      // bac_value (numeric), over_limit (boolean), fine_amount (numeric),
+      // recorded_at (timestamptz), created_at (default now())
+      const { data: reading, error: readingError } = await supabase
+        .from("bac_readings")
+        .insert({
+          driver_id: driver.id,
+          bac_value: Number(parsedBac.bac),
+          over_limit: parsedBac.overLimit,
+          fine_amount: Number(parsedBac.fine),
+          recorded_at: new Date(parsedBac.timestamp).toISOString(),
+        })
+        .select()
+        .single();
+
+      if (readingError) {
+        console.error("[Upload] BAC reading insert error:", readingError);
+        return res.status(500).json({
+          code: "DATABASE_ERROR",
+          message: "Failed to save BAC reading.",
+        });
+      }
+
+      console.log(`[Upload] ✅ Saved driver ${driver.id} + reading ${reading.id}`);
 
       return res.status(201).json({
         success: true,
         message: "Upload successful",
-        data: {
-          driverId: driver._id,
-          readingId: reading._id,
+         {
+          driverId: driver.id,
+          readingId: reading.id,
           photoUrl,
         },
       });
 
     } catch (err: any) {
       console.error("❌ Upload error:", err);
-
-      // Handle MongoDB duplicate key error
-      if (err.code === 11000) {
-        const field = Object.keys(err.keyPattern || {})[0];
-        return res.status(409).json({ 
-          error: `Driver with this ${field} already exists` 
-        });
-      }
 
       return res.status(500).json({
         error: "Upload failed",
