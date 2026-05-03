@@ -96,11 +96,11 @@ async function startServer() {
   }
 }
 
-// ─── Process error guards ─────────────────────────────────────────────────────
+// ─── Process error guards only (no SIGTERM handler) ───────────────────────────
 process.on("uncaughtException",   (err)    => console.error("❌ Uncaught Exception:", err));
 process.on("unhandledRejection",  (reason) => console.error("❌ Unhandled Rejection:", reason));
 
-// 🔥 SIGTERM handler REMOVED - let Render/Bun handle restart silently
+// 🔥 SIGTERM handler COMPLETELY REMOVED — Render/Bun handles restart silently
 
 startServer();
 
