@@ -1,508 +1,270 @@
-/**
- * src/features/home/DriverCard.tsx
- * Driver licence scanning with OCR, manual editing, and debounced validation
- */
-
-import React, { useState, useCallback, useRef, useEffect } from "react";
+// src/features/home/DriverCard.tsx
+import React, { useState, useCallback } from "react";
 import {
-  View, Text, StyleSheet, TouchableOpacity,
-  Image, ActivityIndicator, Modal, Alert,
-  TextInput,
+  View, Text, StyleSheet, TouchableOpacity, Image,
+  Alert, ActivityIndicator, Platform
 } from "react-native";
-import {
-  Camera,
-  useCameraDevice,
-  useCameraPermission,
-} from "react-native-vision-camera";
-import {
-  parseDriverLicence,
-  FIELD_LIMITS,
-  isValidZimID,
-  isValidDate,
-  isValidLicenceNumber,
-} from "../../helpers/ocrParser";
-import { type DriverData, EMPTY_DRIVER } from "../../helpers/constants";
+import { launchImageLibraryAsync } from "expo-camera/next";
+import TextRecognition from "@react-native-ml-kit/text-recognition";
 
-interface Props {
-  onDataChange: (data: DriverData, isValid: boolean, photoUri: string | null) => void;
+import { parseOCRText } from "../../helpers/ocrParser";
+import { postProcess } from "../../helpers/ocrPostProcessor";
+import { type DriverData, FIELD_LIMITS } from "../../helpers/constants";
+import DataRow from "./DataRow";
+
+interface DriverCardProps {
+  onDataChange: ( DriverData, isValid: boolean, photoUri: string | null) => void;
 }
 
-const FIELD_CONFIGS: {
-  key:         keyof DriverData;
-  label:       string;
-  num:         string;
-  caps:        "none" | "words" | "characters";
-  placeholder: string;
-}[] = [
-  { key: "surname",       label: "Surname",  num: "1",    caps: "words",      placeholder: "Runowanda"        },
-  { key: "firstName",     label: "Name",     num: "2",    caps: "words",      placeholder: "Mathews Tafadzwa" },
-  { key: "dateOfBirth",   label: "DOB",      num: "3",    caps: "none",       placeholder: "21/04/2006"       },
-  { key: "gender",        label: "Gender",   num: "3",    caps: "characters", placeholder: "M"                },
-  { key: "idNumber",      label: "ID No",    num: "4d",   caps: "characters", placeholder: "01/232006083Z04"  },
-  { key: "licenceNumber", label: "Lic No",   num: "5",    caps: "characters", placeholder: "AA00625325"       },
-  { key: "licenceCode",   label: "Code",     num: "9",    caps: "characters", placeholder: "BE"               },
-  { key: "issueDate",     label: "Issue",    num: "4a,b", caps: "none",       placeholder: "09/01/2025"       },
-  { key: "expiryDate",    label: "Expiry",   num: "11",   caps: "none",       placeholder: "09/01/2030"       },
-];
+// ─── Native-looking Gallery Icon (Pure StyleSheet, zero deps) ─────────────
+const GalleryIcon = () => (
+  <View style={iconStyles.container}>
+    <View style={iconStyles.frame} />
+    <View style={iconStyles.mountain1} />
+    <View style={iconStyles.mountain2} />
+    <View style={iconStyles.sun} />
+  </View>
+);
 
-const VALIDATORS: Partial<Record<keyof DriverData, (v: string) => boolean>> = {
-  dateOfBirth:   isValidDate,
-  issueDate:     isValidDate,
-  expiryDate:    isValidDate,
-  idNumber:      isValidZimID,
-  licenceNumber: isValidLicenceNumber,
-  gender:        v => v === "M" || v === "F",
-};
+const iconStyles = StyleSheet.create({
+  container: { width: 18, height: 18, marginRight: 8 },
+  frame: {
+    position: "absolute",
+    width: 16, height: 16,
+    borderWidth: 1.5, borderColor: "#000",
+    borderRadius: 3,
+    backgroundColor: "#fff",
+  },
+  mountain1: {
+    position: "absolute", bottom: 2, left: 2,
+    width: 0, height: 0,
+    borderLeftWidth: 4, borderLeftColor: "transparent",
+    borderRightWidth: 4, borderRightColor: "transparent",
+    borderBottomWidth: 5, borderBottomColor: "#333",
+  },
+  mountain2: {
+    position: "absolute", bottom: 2, left: 6,
+    width: 0, height: 0,
+    borderLeftWidth: 5, borderLeftColor: "transparent",
+    borderRightWidth: 5, borderRightColor: "transparent",
+    borderBottomWidth: 6, borderBottomColor: "#555",
+  },
+  sun: {
+    position: "absolute", top: 2.5, right: 2.5,
+    width: 3, height: 3,
+    borderRadius: 1.5,
+    backgroundColor: "#FFA500",
+  },
+});
 
-// ── Camera Modal ──────────────────────────────────────────────────────────────
+export default function DriverCard({ onDataChange }: DriverCardProps) {
+  // ─── ALL HOOKS AT TOP (Strict React Rules — No Conditional Hooks) ───────
+  const [data, setData] = useState<Partial<DriverData>>({});
+  const [phase, setPhase] = useState<"idle" | "processing" | "done">("idle");
+  const [photoUri, setPhotoUri] = useState<string | null>(null);
+  const [retaking, setRetaking] = useState(false);
 
-function CameraModal({ visible, onCapture, onClose }: {
-  visible: boolean;
-  onCapture: (uri: string) => void;
-  onClose: () => void;
-}) {
-  const device = useCameraDevice("back");
-  const camera = useRef<Camera>(null);
-  const [busy, setBusy] = useState(false);
+  // ─── Handlers (Unconditional — Safe for React) ─────────────────────────
+  const handleChange = useCallback((key: keyof DriverData, val: string) => {
+    setData(prev => ({ ...prev, [key]: val }));
+  }, []);
 
-  const shoot = useCallback(async () => {
-    if (!camera.current || busy) return;
-    setBusy(true);
+  const handlePickImage = useCallback(async () => {
+    setPhase("processing");
+    
     try {
-      const photo = await camera.current.takePhoto({ flash: "off" });
-      onCapture(`file://${photo.path}`);
-    } catch {
-      Alert.alert("Error", "Could not capture photo. Try again.");
-    }
-    setBusy(false);
-  }, [busy, onCapture]);
+      // ✅ Uses expo-camera's built-in gallery picker (no new deps)
+      const result = await launchImageLibraryAsync({
+        mediaTypes: "images",
+        allowsEditing: false,
+        quality: 0.85,
+      });
 
-  return (
-    <Modal visible={visible} animationType="slide" statusBarTranslucent>
-      <View style={cm.root}>
-        {device ? (
-          <Camera
-            ref={camera}
-            style={StyleSheet.absoluteFill}
-            device={device}
-            isActive={visible}
-            photo
-          />
-        ) : (
-          <View style={cm.noDevice}>
-            <Text style={cm.noDeviceTxt}>No camera available</Text>
-          </View>
-        )}
-        <View style={cm.top}>
-          <TouchableOpacity onPress={onClose} style={cm.closeBtn}>
-            <Text style={cm.closeTxt}>✕  CLOSE</Text>
-          </TouchableOpacity>
-          <Text style={cm.title}>SCAN LICENCE</Text>
-          <View style={{ width: 72 }} />
-        </View>
-        <View style={cm.vfWrap}>
-          <View style={cm.vf}>
-            <View style={[cm.corner, cm.cTL]} />
-            <View style={[cm.corner, cm.cTR]} />
-            <View style={[cm.corner, cm.cBL]} />
-            <View style={[cm.corner, cm.cBR]} />
-            <View style={cm.scanLine} />
-          </View>
-          <Text style={cm.hint}>Align full licence front face within frame</Text>
-        </View>
-        <View style={cm.bottom}>
-          <TouchableOpacity
-            style={cm.captureBtn}
-            onPress={shoot}
-            disabled={busy || !device}
-            activeOpacity={0.85}
-          >
-            {busy
-              ? <ActivityIndicator color="#121212" size="small" />
-              : <View style={cm.captureBtnCore} />
-            }
-          </TouchableOpacity>
-        </View>
-      </View>
-    </Modal>
-  );
-}
+      if (!result.canceled && result.assets?.[0]?.uri) {
+        let uri = result.assets[0].uri;
+        
+        // Normalize URI for ML Kit on Android
+        if (Platform.OS === "android" && !uri.startsWith("file://")) {
+          uri = `file://${uri}`;
+        }
+        
+        setPhotoUri(uri);
 
-// ── Zoom Modal ────────────────────────────────────────────────────────────────
+        // Run OCR on selected image
+        const textResult = await TextRecognition.recognize(uri);
+        const parsed = parseOCRText(textResult.text);
+        const cleaned = postProcess(parsed.data);
 
-function ZoomModal({ uri, visible, onClose }: {
-  uri: string | null;
-  visible: boolean;
-  onClose: () => void;
-}) {
-  return (
-    <Modal visible={visible} animationType="fade" statusBarTranslucent transparent>
-      <View style={zm.backdrop}>
-        <TouchableOpacity style={StyleSheet.absoluteFill} onPress={onClose} activeOpacity={1} />
-        {uri && (
-          <View style={zm.imgWrap}>
-            <Image source={{ uri }} style={zm.img} resizeMode="contain" />
-            <TouchableOpacity style={zm.closeBtn} onPress={onClose}>
-              <Text style={zm.closeTxt}>✕</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-      </View>
-    </Modal>
-  );
-}
-
-// ── Fields block — with DEBOUNCED VALIDATION ─────────────────────────────────
-
-function FieldsBlock({ data, onChange, retaking, visible }: {
-  data: DriverData;
-  onChange: (key: keyof DriverData, val: string) => void;
-  retaking: boolean;
-  visible: boolean;
-}) {
-  const [focused, setFocused] = useState<keyof DriverData | null>(null);
-
-  // 🔧 Debounced validation hook - prevents error flickering during editing
-  function useDebouncedValidator(
-    value: string,
-    validator: ((v: string) => boolean) | undefined,
-    delay = 500
-  ) {
-    const [isValid, setIsValid] = useState(true);
-    
-    useEffect(() => {
-      if (!validator) {
-        setIsValid(true);
-        return;
+        setData(cleaned);
+        setPhase("done");
+        
+        // Pass to HomeScreen (HomeScreen handles final validation/upload)
+        onDataChange(cleaned, true, uri);
+      } else {
+        setPhase("idle");
       }
-      
-      const timer = setTimeout(() => {
-        setIsValid(!value || validator(value));
-      }, delay);
-      
-      return () => clearTimeout(timer);
-    }, [value, validator, delay]);
-    
-    return isValid;
-  }
+    } catch (err: any) {
+      console.error("Gallery/OCR error:", err);
+      Alert.alert("Processing Failed", "Could not extract text from this image.");
+      setPhase("idle");
+    }
+  }, [onDataChange]);
 
+  const handleRetake = useCallback(() => {
+    setRetaking(true);
+    setData({});
+    setPhotoUri(null);
+    setPhase("idle");
+    setRetaking(false);
+  }, []);
+
+  // ─── RENDER (Conditional UI is safe AFTER all hooks) ────────────────────
   return (
-    <View style={[fb.wrap, !visible && fb.hidden]}>
-      {retaking && (
-        <View style={fb.retakingOverlay}>
-          <ActivityIndicator color="#1DB954" size="small" />
-          <Text style={fb.retakingTxt}>Reading new scan…</Text>
+    <View style={styles.card}>
+      {/* AI Disclaimer Banner — Exact text requested, top of card */}
+      {phase === "done" && (
+        <View style={styles.banner}>
+          <Text style={styles.bannerText}>
+            AI can make mistakes. Double check the details before upload.
+          </Text>
         </View>
       )}
-      {FIELD_CONFIGS.map((fc, i) => {
-        const val    = data[fc.key];
-        const filled = val.length > 0;
-        const validator = VALIDATORS[fc.key];
-        
-        // 🔧 Use debounced validation instead of immediate
-        const isValid = useDebouncedValidator(val, validator);
-        
-        const isFoc  = focused === fc.key;
-        const isLast = i === FIELD_CONFIGS.length - 1;
 
-        return (
-          <View
-            key={fc.key}
-            style={[
-              fb.row,
-              isFoc  && fb.rowFocused,
-              !isValid && filled && fb.rowError, // ← Uses debounced isValid
-              isLast && { borderBottomWidth: 0 },
-            ]}
-          >
-            <Text style={fb.num}>{fc.num}</Text>
-            <Text style={fb.label}>{fc.label}</Text>
-            <TextInput
-              style={fb.input}
-              value={val}
-              onChangeText={v => {
-                if (v.length <= FIELD_LIMITS[fc.key]) onChange(fc.key, v);
-              }}
-              placeholder={fc.placeholder}
-              placeholderTextColor="#252525"
-              maxLength={FIELD_LIMITS[fc.key]}
-              selectionColor="#1DB954"
-              autoCapitalize={fc.caps}
-              editable={!retaking}
-              onFocus={() => setFocused(fc.key)}
-              onBlur={() => setFocused(null)}
-            />
-            {/* 🔧 Show error dot only when debounced validation fails AND not focused */}
-            {!isValid && filled && !isFoc && <View style={fb.errorDot} />}
-          </View>
-        );
-      })}
+      <View style={styles.header}>
+        <Text style={styles.title}>Driver Licence</Text>
+        {phase === "done" && (
+          <TouchableOpacity onPress={handleRetake} disabled={retaking}>
+            <Text style={styles.retakeText}>🔄 Rescan</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
+      {phase === "idle" && (
+        <TouchableOpacity onPress={handlePickImage} style={styles.pickBtn}>
+          <GalleryIcon />
+          <Text style={styles.pickBtnText}>Choose from Gallery</Text>
+        </TouchableOpacity>
+      )}
+
+      {phase === "processing" && (
+        <View style={styles.processingRow}>
+          <ActivityIndicator size="small" color="#1DB954" />
+          <Text style={styles.processingText}>Extracting text…</Text>
+        </View>
+      )}
+
+      {phase === "done" && (
+        <View style={styles.fieldsGrid}>
+          <DataRow label="Surname" value={data.surname ?? ""} editable={!retaking} onChange={(val) => handleChange("surname", val)} maxLength={FIELD_LIMITS.surname} />
+          <DataRow label="First Name" value={data.firstName ?? ""} editable={!retaking} onChange={(val) => handleChange("firstName", val)} maxLength={FIELD_LIMITS.firstName} />
+          <DataRow label="DOB" value={data.dateOfBirth ?? ""} placeholder="DD/MM" editable={!retaking} onChange={(val) => handleChange("dateOfBirth", val)} maxLength={10} />
+          <DataRow label="Gender" value={data.gender ?? ""} placeholder="M/F" editable={!retaking} onChange={(val) => handleChange("gender", val.toUpperCase())} maxLength={1} />
+          <DataRow label="ID Number" value={data.idNumber ?? ""} editable={!retaking} onChange={(val) => handleChange("idNumber", val)} maxLength={FIELD_LIMITS.idNumber} />
+          <DataRow label="Licence No" value={data.licenceNumber ?? ""} editable={!retaking} onChange={(val) => handleChange("licenceNumber", val)} maxLength={FIELD_LIMITS.licenceNumber} />
+          <DataRow label="Code" value={data.licenceCode ?? ""} placeholder="B/CE/4" editable={!retaking} onChange={(val) => handleChange("licenceCode", val)} maxLength={4} />
+          <DataRow label="Issue" value={data.issueDate ?? ""} placeholder="DD/MM" editable={!retaking} onChange={(val) => handleChange("issueDate", val)} maxLength={10} />
+          <DataRow label="Expiry" value={data.expiryDate ?? ""} placeholder="DD/MM" editable={!retaking} onChange={(val) => handleChange("expiryDate", val)} maxLength={10} />
+
+          {photoUri && (
+            <View style={styles.previewContainer}>
+              <View style={styles.previewFrame}>
+                <Image 
+                  source={{ uri: photoUri }} 
+                  style={styles.previewImage} 
+                  resizeMode="contain"
+                />
+              </View>
+              <Text style={styles.previewHint}>Original licence photo</Text>
+            </View>
+          )}
+        </View>
+      )}
     </View>
   );
 }
 
-// ── DriverCard ────────────────────────────────────────────────────────────────
-
-export default function DriverCard({ onDataChange }: Props) {
-  const { hasPermission, requestPermission } = useCameraPermission();
-
-  const [data,       setData]       = useState<DriverData>(EMPTY_DRIVER);
-  const [photoUri,   setPhotoUri]   = useState<string | null>(null);
-  const [phase,      setPhase]      = useState<"idle" | "scanning" | "done" | "retaking">("idle");
-  const [showCamera, setShowCamera] = useState(false);
-  const [showZoom,   setShowZoom]   = useState(false);
-  const [error,      setError]      = useState("");
-
-  const prevData     = useRef<DriverData>(EMPTY_DRIVER);
-  const prevPhotoUri = useRef<string | null>(null);
-
-  const openCamera = useCallback(async () => {
-    setError("");
-    if (!hasPermission) {
-      const granted = await requestPermission();
-      if (!granted) {
-        setError("Camera permission denied. Enable it in Settings.");
-        return;
-      }
-    }
-    setShowCamera(true);
-  }, [hasPermission, requestPermission]);
-
-  const handleCapture = useCallback(async (uri: string) => {
-    setShowCamera(false);
-
-    const isRetake = phase === "done" || phase === "retaking";
-
-    if (isRetake) {
-      prevData.current     = data;
-      prevPhotoUri.current = photoUri;
-      setPhase("retaking");
-    } else {
-      setPhase("scanning");
-    }
-
-    setPhotoUri(uri);
-    setError("");
-
-    try {
-      const parsed = await parseDriverLicence(uri);
-      setData(parsed);
-      setPhase("done");
-      onDataChange(parsed, !!(parsed.surname && parsed.licenceNumber), uri);
-    } catch {
-      if (isRetake) {
-        setData(prevData.current);
-        setPhotoUri(prevPhotoUri.current);
-        setPhase("done");
-        onDataChange(
-          prevData.current,
-          !!(prevData.current.surname && prevData.current.licenceNumber),
-          prevPhotoUri.current
-        );
-        setError("Could not read new scan. Previous data restored.");
-      } else {
-        setData(EMPTY_DRIVER);
-        setPhase("done");
-        onDataChange(EMPTY_DRIVER, false, uri);
-        setError("Could not read licence. Fill in details manually.");
-      }
-    }
-  }, [phase, data, photoUri, onDataChange]);
-
-  const handleFieldChange = useCallback((key: keyof DriverData, val: string) => {
-    setData(prev => {
-      const next = { ...prev, [key]: val };
-      onDataChange(next, !!(next.surname && next.licenceNumber), photoUri);
-      return next;
-    });
-  }, [onDataChange, photoUri]);
-
-  const handleRetake = useCallback(() => openCamera(), [openCamera]);
-
-  const handleClear = useCallback(() => {
-    setData(EMPTY_DRIVER);
-    setPhotoUri(null);
-    setError("");
-    setPhase("idle");
-    prevData.current     = EMPTY_DRIVER;
-    prevPhotoUri.current = null;
-    onDataChange(EMPTY_DRIVER, false, null);
-  }, [onDataChange]);
-
-  const isRetaking     = phase === "retaking";
-  const showDoneHeader = phase === "done" || phase === "retaking";
-  const showFields     = phase === "done" || phase === "retaking";
-  const showIdle       = phase === "idle";
-  const showScanning   = phase === "scanning";
-
-  return (
-    <>
-      <CameraModal
-        visible={showCamera}
-        onCapture={handleCapture}
-        onClose={() => setShowCamera(false)}
-      />
-      <ZoomModal
-        uri={photoUri}
-        visible={showZoom}
-        onClose={() => setShowZoom(false)}
-      />
-
-      <View style={s.card}>
-
-        {/* Idle */}
-        <View style={[s.idle, !showIdle && s.hidden]}>
-          <TouchableOpacity
-            style={s.idleInner}
-            onPress={openCamera}
-            activeOpacity={0.75}
-            disabled={!showIdle}
-          >
-            <Text style={s.idleIcon}>🪪</Text>
-            <Text style={s.idleTxt}>Tap to scan driver licence</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Scanning */}
-        <View style={[s.idle, !showScanning && s.hidden]}>
-          <ActivityIndicator color="#1DB954" size="small" />
-          <Text style={s.scanningTxt}>Reading licence…</Text>
-        </View>
-
-        {/* Done header */}
-        <View style={[s.doneHeader, !showDoneHeader && s.hidden]}>
-          <View style={s.headerLeft}>
-            <View style={s.accent} />
-            <Text style={s.headerTitle}>DRIVER DETAILS</Text>
-          </View>
-          <View style={s.headerRight}>
-            {photoUri && (
-              <TouchableOpacity
-                style={s.thumb}
-                onPress={() => setShowZoom(true)}
-                activeOpacity={0.8}
-                disabled={isRetaking}
-              >
-                <Image source={{ uri: photoUri }} style={s.thumbImg} resizeMode="cover" />
-                <View style={s.thumbOverlay}>
-                  <Text style={s.thumbZoomTxt}>⤢</Text>
-                </View>
-              </TouchableOpacity>
-            )}
-            <TouchableOpacity
-              style={[s.actionBtn, isRetaking && s.btnDisabled]}
-              onPress={handleRetake}
-              disabled={isRetaking}
-              activeOpacity={0.7}
-            >
-              <Text style={s.actionBtnTxt}>RETAKE</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[s.actionBtnGhost, isRetaking && s.btnDisabled]}
-              onPress={handleClear}
-              disabled={isRetaking}
-              activeOpacity={0.7}
-            >
-              <Text style={s.actionBtnGhostTxt}>CLEAR</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Fields — always mounted, with debounced validation */}
-        <FieldsBlock
-          data={data}
-          onChange={handleFieldChange}
-          retaking={isRetaking}
-          visible={showFields}
-        />
-
-        {!!error && (
-          <View style={s.errorBox}>
-            <Text style={s.errorTxt}>{error}</Text>
-          </View>
-        )}
-
-      </View>
-    </>
-  );
-}
-
-// ── Styles ────────────────────────────────────────────────────────────────────
-
-const CS = 18;
-const CT = 2.5;
-
-const cm = StyleSheet.create({
-  root:           { flex: 1, backgroundColor: "#000" },
-  noDevice:       { ...StyleSheet.absoluteFillObject, justifyContent: "center", alignItems: "center", backgroundColor: "#000" } as any,
-  noDeviceTxt:    { color: "#555", fontSize: 13 },
-  top:            { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 20, paddingTop: 56, paddingBottom: 14, backgroundColor: "rgba(0,0,0,0.6)" },
-  title:          { color: "#fff", fontSize: 11, fontWeight: "800", letterSpacing: 3 },
-  closeBtn:       { width: 72 },
-  closeTxt:       { color: "rgba(255,255,255,0.7)", fontSize: 11, fontWeight: "700", letterSpacing: 1 },
-  vfWrap:         { flex: 1, justifyContent: "center", alignItems: "center", gap: 18 },
-  vf:             { width: 320, height: 200, position: "relative" },
-  corner:         { position: "absolute", width: CS, height: CS, borderColor: "#1DB954" },
-  cTL:            { top: 0,    left: 0,  borderTopWidth: CT,    borderLeftWidth: CT   },
-  cTR:            { top: 0,    right: 0, borderTopWidth: CT,    borderRightWidth: CT  },
-  cBL:            { bottom: 0, left: 0,  borderBottomWidth: CT, borderLeftWidth: CT   },
-  cBR:            { bottom: 0, right: 0, borderBottomWidth: CT, borderRightWidth: CT  },
-  scanLine:       { position: "absolute", left: 0, right: 0, top: "50%", height: 1, backgroundColor: "#1DB95450" },
-  hint:           { color: "rgba(255,255,255,0.4)", fontSize: 11, fontWeight: "600", letterSpacing: 1 },
-  bottom:         { alignItems: "center", paddingBottom: 52, paddingTop: 20, backgroundColor: "rgba(0,0,0,0.6)" },
-  captureBtn:     { width: 70, height: 70, borderRadius: 35, borderWidth: 3, borderColor: "rgba(255,255,255,0.6)", justifyContent: "center", alignItems: "center" },
-  captureBtnCore: { width: 54, height: 54, borderRadius: 27, backgroundColor: "#1DB954" },
-});
-
-const zm = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.93)", justifyContent: "center", alignItems: "center" },
-  imgWrap:  { width: "92%", aspectRatio: 1.58, borderRadius: 8, overflow: "hidden", borderWidth: 1, borderColor: "rgba(29,185,84,0.3)" },
-  img:      { width: "100%", height: "100%" },
-  closeBtn: { position: "absolute", top: 10, right: 10, width: 28, height: 28, borderRadius: 14, backgroundColor: "rgba(0,0,0,0.75)", justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: "#333" },
-  closeTxt: { color: "#fff", fontSize: 11, fontWeight: "700" },
-});
-
-const fb = StyleSheet.create({
-  wrap:            { position: "relative" },
-  hidden:          { display: "none" },
-  retakingOverlay: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 10, backgroundColor: "rgba(18,18,18,0.8)", justifyContent: "center", alignItems: "center", gap: 8 },
-  retakingTxt:     { color: "#1DB954", fontSize: 10, fontWeight: "600" },
-  row:             { flexDirection: "row", alignItems: "center", borderBottomWidth: 1, borderBottomColor: "#111", paddingVertical: 4, paddingHorizontal: 12, gap: 6 },
-  rowFocused:      { borderBottomColor: "#1DB95430", backgroundColor: "rgba(29,185,84,0.03)" },
-  rowError:        { borderBottomColor: "rgba(255,76,76,0.3)" },
-  num:             { color: "#1DB954", fontSize: 7, fontWeight: "800", width: 22 },
-  label:           { color: "#333", fontSize: 9, fontWeight: "600", width: 44 },
-  input:           { flex: 1, color: "#e0e0e0", fontSize: 10, fontWeight: "600", paddingVertical: 0, textAlign: "right" },
-  errorDot:        { width: 5, height: 5, borderRadius: 3, backgroundColor: "#FF4C4C", marginLeft: 4 },
-});
-
-const s = StyleSheet.create({
-  card:             { backgroundColor: "#1a1a1a", borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: "rgba(255,255,255,0.05)", overflow: "hidden" },
-  hidden:           { display: "none" },
-
-  idle:             { height: 64, flexDirection: "row", justifyContent: "center", alignItems: "center", gap: 10 },
-  idleInner:        { flexDirection: "row", alignItems: "center", gap: 10 },
-  idleIcon:         { fontSize: 18 },
-  idleTxt:          { color: "#333", fontSize: 12, fontWeight: "600" },
-  scanningTxt:      { color: "#1DB954", fontSize: 11, marginLeft: 8 },
-
-  doneHeader:       { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, paddingTop: 7, paddingBottom: 6, borderBottomWidth: 1, borderBottomColor: "#1e1e1e" },
-  headerLeft:       { flexDirection: "row", alignItems: "center", gap: 8 },
-  accent:           { width: 3, height: 11, backgroundColor: "#1DB954", borderRadius: 2 },
-  headerTitle:      { color: "#555", fontSize: 8, fontWeight: "800", letterSpacing: 2 },
-  headerRight:      { flexDirection: "row", alignItems: "center", gap: 6 },
-
-  thumb:            { width: 36, height: 24, borderRadius: 4, overflow: "hidden", borderWidth: 1, borderColor: "rgba(29,185,84,0.4)" },
-  thumbImg:         { width: "100%", height: "100%" },
-  thumbOverlay:     { position: "absolute", bottom: 0, left: 0, right: 0, backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center" },
-  thumbZoomTxt:     { color: "#1DB954", fontSize: 6, fontWeight: "800" },
-
-  actionBtn:        { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 3, backgroundColor: "#1DB954" },
-  actionBtnTxt:     { color: "#000", fontSize: 7, fontWeight: "900", letterSpacing: 1 },
-  actionBtnGhost:   { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 3, borderWidth: 1, borderColor: "#2a2a2a" },
-  actionBtnGhostTxt:{ color: "#444", fontSize: 7, fontWeight: "700", letterSpacing: 1 },
-  btnDisabled:      { opacity: 0.4 },
-
-  errorBox:         { marginHorizontal: 12, marginBottom: 6, marginTop: 4, backgroundColor: "rgba(255,76,76,0.07)", borderLeftWidth: 2, borderLeftColor: "#FF4C4C", borderRadius: 3, padding: 5 },
-  errorTxt:         { color: "#FF4C4C", fontSize: 9 },
+// ─── Styles (Compact, No ScrollView) ──────────────────────────────────────
+const styles = StyleSheet.create({
+  card: {
+    backgroundColor: "#1a1a1a",
+    borderRadius: 16,
+    padding: 12,
+    marginHorizontal: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.05)",
+  },
+  header: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  title: { color: "#fff", fontSize: 16, fontWeight: "700" },
+  retakeText: { color: "#1DB954", fontSize: 12, fontWeight: "600" },
+  
+  banner: {
+    backgroundColor: "rgba(255,165,0,0.15)",
+    borderLeftWidth: 3,
+    borderLeftColor: "#FFA500",
+    borderRadius: 4,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginBottom: 12,
+  },
+  bannerText: {
+    color: "#FFA500",
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  
+  pickBtn: {
+    backgroundColor: "#1DB954",
+    paddingVertical: 14,
+    borderRadius: 10,
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "center",
+  },
+  pickBtnText: { color: "#000", fontSize: 14, fontWeight: "700" },
+  
+  processingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 20,
+    justifyContent: "center",
+  },
+  processingText: { color: "#888", fontSize: 12 },
+  
+  fieldsGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  
+  previewContainer: {
+    marginTop: 12,
+    alignItems: "center",
+    width: "100%",
+  },
+  previewFrame: {
+    width: "100%",
+    aspectRatio: 1.58,
+    borderRadius: 12,
+    overflow: "hidden",
+    backgroundColor: "#000",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+  },
+  previewImage: {
+    width: "100%",
+    height: "100%",
+  },
+  previewHint: {
+    color: "#555",
+    fontSize: 9,
+    marginTop: 6,
+    textAlign: "center",
+  },
 });
