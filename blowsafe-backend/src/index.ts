@@ -11,6 +11,9 @@ import compression from "compression";
 import path from "path";
 import fs from "fs";
 
+// Import DB connection function
+import { connectDB } from "./config/db"; // <--- MAKE SURE THIS FILE EXISTS
+
 import { env } from "./config/env";
 import { initSocket } from "./config/socket";
 import authRoutes from "./routes/auth";
@@ -72,11 +75,18 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
 // ─── Startup ──────────────────────────────────────────────────────────────────
 async function startServer() {
   try {
+    // 1. Connect to Database FIRST
+    console.log("🔄 Connecting to MongoDB...");
+    await connectDB(); 
+    console.log("✅ MongoDB Connected");
+
     console.log("✅ Supabase client ready (lazy-loaded)");
 
+    // 2. Initialize Socket
     initSocket(httpServer);
     console.log("✅ Socket initialized");
 
+    // 3. Prepare Local Uploads (Dev Only)
     if (process.env.NODE_ENV === "development") {
       const uploadPath = path.join(process.cwd(), "uploads", "driver-photos");
       if (!fs.existsSync(uploadPath)) {
@@ -85,6 +95,7 @@ async function startServer() {
       console.log(`📁 Local upload directory ready: ${uploadPath}`);
     }
 
+    // 4. Start Server
     httpServer.listen(env.PORT, "0.0.0.0", () => {
       console.log(`🚀 Server running on port ${env.PORT}`);
       console.log(`🌐 ${process.env.API_BASE_URL ?? `http://0.0.0.0:${env.PORT}`}`);
@@ -99,8 +110,6 @@ async function startServer() {
 // ─── Process error guards only (no SIGTERM handler) ───────────────────────────
 process.on("uncaughtException",   (err)    => console.error("❌ Uncaught Exception:", err));
 process.on("unhandledRejection",  (reason) => console.error("❌ Unhandled Rejection:", reason));
-
-// 🔥 SIGTERM handler COMPLETELY REMOVED — Render/Bun handles restart silently
 
 startServer();
 
