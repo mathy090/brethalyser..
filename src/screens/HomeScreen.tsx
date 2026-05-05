@@ -19,6 +19,7 @@ import {
   ScrollView,
   Alert,
   ActivityIndicator,
+  Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { launchImageLibrary } from "react-native-image-picker";
@@ -181,6 +182,15 @@ export default function HomeScreen() {
     expiryDate,
   }), [surname, firstName, dateOfBirth, gender, idNumber, licenceNumber, licenceCode, issueDate, expiryDate]);
 
+  // ── Upload readiness – NO longer requires BAC to enable button ──
+  const uploadReady =
+    driverValid &&
+    !!photoUri &&
+    !isBlobLoading &&
+    photoBlobRef.current instanceof Blob;
+
+  const uploadButtonDisabled = !uploadReady || isUploading;
+
   // ── Upload logic ───────────────────────────────────
   const handleUpload = useCallback(async () => {
     if (!driverValid) {
@@ -302,28 +312,27 @@ export default function HomeScreen() {
       setIsUploading(false);
       uploadAbortRef.current = null;
     }
-  }, [driverValid, bacResult, photoUri, isBlobLoading, isConnected, officer, buildDriverData]);
+  }, [
+    driverValid,
+    bacResult,
+    photoUri,
+    isBlobLoading,
+    isConnected,
+    officer,
+    buildDriverData,
+  ]);
 
   // ── Derived ──────────────────────────────────────────
   const fineInfo = bacResult
     ? calculateFine(parseFloat(bacResult.bacPercent.replace("%", "")))
     : null;
 
-  const uploadReady =
-    driverValid &&
-    !!bacResult &&
-    !!photoUri &&
-    !isBlobLoading &&
-    photoBlobRef.current instanceof Blob;
-
-  const uploadButtonDisabled = !uploadReady || isUploading;
-
   // ── Render ───────────────────────────────────────────
   return (
     <SafeAreaView style={s.root} edges={["top"]}>
       <StatusBar barStyle="light-content" backgroundColor="#121212" />
 
-      {/* Top bar – unchanged */}
+      {/* Top bar */}
       <View style={s.topBar}>
         <View style={s.logoWrap}>
           <Image
@@ -488,7 +497,7 @@ export default function HomeScreen() {
           )}
         </View>
 
-        {/* BAC result – unchanged */}
+        {/* BAC result */}
         {bacResult && (
           <View style={s.bacSection}>
             <Text style={s.sectionLabel}>LATEST READING</Text>
@@ -541,7 +550,7 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* Upload button – unchanged */}
+        {/* Upload button – enabled without BAC, alert shown if missing */}
         <TouchableOpacity
           style={[s.uploadBtn, uploadButtonDisabled && s.uploadBtnOff]}
           onPress={handleUpload}
@@ -574,18 +583,19 @@ export default function HomeScreen() {
           )}
         </TouchableOpacity>
 
+        {/* Hints */}
         {!driverValid && (
           <Text style={s.hint}>
             Complete all driver details and attach a licence photo
           </Text>
         )}
-        {driverValid && !bacResult && (
-          <Text style={s.hint}>
-            Capture a BAC reading to complete the record
-          </Text>
-        )}
-        {driverValid && !!bacResult && !photoUri && (
+        {driverValid && !photoUri && (
           <Text style={s.hint}>Attach the licence photo before uploading</Text>
+        )}
+        {driverValid && !!photoUri && !bacResult && (
+          <Text style={s.hint}>
+            Capture a BAC reading – required to complete upload
+          </Text>
         )}
 
         <Text style={s.legalNote}>
