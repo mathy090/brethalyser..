@@ -4,7 +4,7 @@ import {
   View, Text, StyleSheet, TouchableOpacity, Image,
   Alert, ActivityIndicator, Platform
 } from "react-native";
-import { launchImageLibraryAsync } from "expo-camera/next";
+import { launchImageLibrary } from "react-native-image-picker";   // ✅ new import
 import TextRecognition from "@react-native-ml-kit/text-recognition";
 
 import { parseOCRText } from "../../helpers/ocrParser";
@@ -13,10 +13,10 @@ import { type DriverData, FIELD_LIMITS } from "../../helpers/constants";
 import DataRow from "./DataRow";
 
 interface DriverCardProps {
-  onDataChange: ( DriverData, isValid: boolean, photoUri: string | null) => void;
+  onDataChange: (data: DriverData, isValid: boolean, photoUri: string | null) => void;
 }
 
-// ─── Native-looking Gallery Icon (Pure StyleSheet, zero deps) ─────────────
+// ─── Native-looking Gallery Icon ─────────────────────────────────────────
 const GalleryIcon = () => (
   <View style={iconStyles.container}>
     <View style={iconStyles.frame} />
@@ -58,51 +58,52 @@ const iconStyles = StyleSheet.create({
 });
 
 export default function DriverCard({ onDataChange }: DriverCardProps) {
-  // ─── ALL HOOKS AT TOP (Strict React Rules — No Conditional Hooks) ───────
   const [data, setData] = useState<Partial<DriverData>>({});
   const [phase, setPhase] = useState<"idle" | "processing" | "done">("idle");
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [retaking, setRetaking] = useState(false);
 
-  // ─── Handlers (Unconditional — Safe for React) ─────────────────────────
-  const handleChange = useCallback((key: keyof DriverData, val: string) => {
-    setData(prev => ({ ...prev, [key]: val }));
-  }, []);
+  const handleChange = useCallback(
+    (key: keyof DriverData, val: string) => {
+      setData(prev => ({ ...prev, [key]: val }));
+    },
+    []
+  );
 
   const handlePickImage = useCallback(async () => {
     setPhase("processing");
-    
+
     try {
-      // ✅ Uses expo-camera's built-in gallery picker (no new deps)
-      const result = await launchImageLibraryAsync({
-        mediaTypes: "images",
-        allowsEditing: false,
+      const result = await launchImageLibrary({
+        mediaType: "photo",
         quality: 0.85,
+        includeBase64: false,
       });
 
-      if (!result.canceled && result.assets?.[0]?.uri) {
-        let uri = result.assets[0].uri;
-        
-        // Normalize URI for ML Kit on Android
-        if (Platform.OS === "android" && !uri.startsWith("file://")) {
-          uri = `file://${uri}`;
-        }
-        
-        setPhotoUri(uri);
-
-        // Run OCR on selected image
-        const textResult = await TextRecognition.recognize(uri);
-        const parsed = parseOCRText(textResult.text);
-        const cleaned = postProcess(parsed.data);
-
-        setData(cleaned);
-        setPhase("done");
-        
-        // Pass to HomeScreen (HomeScreen handles final validation/upload)
-        onDataChange(cleaned, true, uri);
-      } else {
+      if (result.didCancel || !result.assets?.length) {
         setPhase("idle");
+        return;
       }
+
+      const asset = result.assets[0];
+      let uri = asset.uri ?? "";
+
+      // ML Kit requires file:// on older Android; content:// works on RN ≥0.65
+      if (Platform.OS === "android" && !uri.startsWith("file://") && !uri.startsWith("content://")) {
+        uri = `file://${uri}`;
+      }
+
+      setPhotoUri(uri);
+
+      const textResult = await TextRecognition.recognize(uri);
+      const parsed = parseOCRText(textResult.text);
+      const cleaned = postProcess(parsed.data);
+
+      setData(cleaned);
+      setPhase("done");
+
+      // Notify HomeScreen (validation & upload)
+      onDataChange(cleaned, true, uri);
     } catch (err: any) {
       console.error("Gallery/OCR error:", err);
       Alert.alert("Processing Failed", "Could not extract text from this image.");
@@ -118,10 +119,8 @@ export default function DriverCard({ onDataChange }: DriverCardProps) {
     setRetaking(false);
   }, []);
 
-  // ─── RENDER (Conditional UI is safe AFTER all hooks) ────────────────────
   return (
     <View style={styles.card}>
-      {/* AI Disclaimer Banner — Exact text requested, top of card */}
       {phase === "done" && (
         <View style={styles.banner}>
           <Text style={styles.bannerText}>
@@ -155,22 +154,22 @@ export default function DriverCard({ onDataChange }: DriverCardProps) {
 
       {phase === "done" && (
         <View style={styles.fieldsGrid}>
-          <DataRow label="Surname" value={data.surname ?? ""} editable={!retaking} onChange={(val) => handleChange("surname", val)} maxLength={FIELD_LIMITS.surname} />
-          <DataRow label="First Name" value={data.firstName ?? ""} editable={!retaking} onChange={(val) => handleChange("firstName", val)} maxLength={FIELD_LIMITS.firstName} />
-          <DataRow label="DOB" value={data.dateOfBirth ?? ""} placeholder="DD/MM" editable={!retaking} onChange={(val) => handleChange("dateOfBirth", val)} maxLength={10} />
-          <DataRow label="Gender" value={data.gender ?? ""} placeholder="M/F" editable={!retaking} onChange={(val) => handleChange("gender", val.toUpperCase())} maxLength={1} />
-          <DataRow label="ID Number" value={data.idNumber ?? ""} editable={!retaking} onChange={(val) => handleChange("idNumber", val)} maxLength={FIELD_LIMITS.idNumber} />
-          <DataRow label="Licence No" value={data.licenceNumber ?? ""} editable={!retaking} onChange={(val) => handleChange("licenceNumber", val)} maxLength={FIELD_LIMITS.licenceNumber} />
-          <DataRow label="Code" value={data.licenceCode ?? ""} placeholder="B/CE/4" editable={!retaking} onChange={(val) => handleChange("licenceCode", val)} maxLength={4} />
-          <DataRow label="Issue" value={data.issueDate ?? ""} placeholder="DD/MM" editable={!retaking} onChange={(val) => handleChange("issueDate", val)} maxLength={10} />
-          <DataRow label="Expiry" value={data.expiryDate ?? ""} placeholder="DD/MM" editable={!retaking} onChange={(val) => handleChange("expiryDate", val)} maxLength={10} />
+          <DataRow label="Surname" value={data.surname ?? ""} editable onChange={(val) => handleChange("surname", val)} maxLength={FIELD_LIMITS.surname} />
+          <DataRow label="First Name" value={data.firstName ?? ""} editable onChange={(val) => handleChange("firstName", val)} maxLength={FIELD_LIMITS.firstName} />
+          <DataRow label="DOB" value={data.dateOfBirth ?? ""} placeholder="DD/MM" editable onChange={(val) => handleChange("dateOfBirth", val)} maxLength={10} />
+          <DataRow label="Gender" value={data.gender ?? ""} placeholder="M/F" editable onChange={(val) => handleChange("gender", val.toUpperCase())} maxLength={1} />
+          <DataRow label="ID Number" value={data.idNumber ?? ""} editable onChange={(val) => handleChange("idNumber", val)} maxLength={FIELD_LIMITS.idNumber} />
+          <DataRow label="Licence No" value={data.licenceNumber ?? ""} editable onChange={(val) => handleChange("licenceNumber", val)} maxLength={FIELD_LIMITS.licenceNumber} />
+          <DataRow label="Code" value={data.licenceCode ?? ""} placeholder="B/CE/4" editable onChange={(val) => handleChange("licenceCode", val)} maxLength={4} />
+          <DataRow label="Issue" value={data.issueDate ?? ""} placeholder="DD/MM" editable onChange={(val) => handleChange("issueDate", val)} maxLength={10} />
+          <DataRow label="Expiry" value={data.expiryDate ?? ""} placeholder="DD/MM" editable onChange={(val) => handleChange("expiryDate", val)} maxLength={10} />
 
           {photoUri && (
             <View style={styles.previewContainer}>
               <View style={styles.previewFrame}>
-                <Image 
-                  source={{ uri: photoUri }} 
-                  style={styles.previewImage} 
+                <Image
+                  source={{ uri: photoUri }}
+                  style={styles.previewImage}
                   resizeMode="contain"
                 />
               </View>
@@ -183,7 +182,7 @@ export default function DriverCard({ onDataChange }: DriverCardProps) {
   );
 }
 
-// ─── Styles (Compact, No ScrollView) ──────────────────────────────────────
+// ─── Styles (identical to original) ──────────────────────────────────────
 const styles = StyleSheet.create({
   card: {
     backgroundColor: "#1a1a1a",
@@ -202,7 +201,6 @@ const styles = StyleSheet.create({
   },
   title: { color: "#fff", fontSize: 16, fontWeight: "700" },
   retakeText: { color: "#1DB954", fontSize: 12, fontWeight: "600" },
-  
   banner: {
     backgroundColor: "rgba(255,165,0,0.15)",
     borderLeftWidth: 3,
@@ -212,12 +210,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     marginBottom: 12,
   },
-  bannerText: {
-    color: "#FFA500",
-    fontSize: 11,
-    fontWeight: "600",
-  },
-  
+  bannerText: { color: "#FFA500", fontSize: 11, fontWeight: "600" },
   pickBtn: {
     backgroundColor: "#1DB954",
     paddingVertical: 14,
@@ -227,7 +220,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   pickBtnText: { color: "#000", fontSize: 14, fontWeight: "700" },
-  
   processingRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -236,18 +228,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   processingText: { color: "#888", fontSize: 12 },
-  
-  fieldsGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-  
-  previewContainer: {
-    marginTop: 12,
-    alignItems: "center",
-    width: "100%",
-  },
+  fieldsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  previewContainer: { marginTop: 12, alignItems: "center", width: "100%" },
   previewFrame: {
     width: "100%",
     aspectRatio: 1.58,
@@ -257,14 +239,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.1)",
   },
-  previewImage: {
-    width: "100%",
-    height: "100%",
-  },
-  previewHint: {
-    color: "#555",
-    fontSize: 9,
-    marginTop: 6,
-    textAlign: "center",
-  },
+  previewImage: { width: "100%", height: "100%" },
+  previewHint: { color: "#555", fontSize: 9, marginTop: 6, textAlign: "center" },
 });
