@@ -6,7 +6,6 @@ import {
   StyleSheet,
   TouchableOpacity,
   Image,
-  Alert,
   ActivityIndicator,
   Platform,
 } from "react-native";
@@ -14,7 +13,6 @@ import { launchImageLibrary } from "react-native-image-picker";
 import TextRecognition from "@react-native-ml-kit/text-recognition";
 
 import { parseOCRText } from "../../helpers/ocrParser";
-import { postProcess } from "../../helpers/ocrPostProcessor";
 import { type DriverData, FIELD_LIMITS } from "../../helpers/constants";
 import DataRow from "./DataRow";
 
@@ -53,6 +51,8 @@ export default function DriverCard({ onDataChange }: DriverCardProps) {
   const handlePickImage = useCallback(async () => {
     setPhase("processing");
 
+    let processedUri: string | null = null;
+
     try {
       const result = await launchImageLibrary({
         mediaType: "photo",
@@ -60,36 +60,23 @@ export default function DriverCard({ onDataChange }: DriverCardProps) {
         includeBase64: false,
       });
 
-      // user cancelled
       if (result.didCancel) {
         setPhase("idle");
         return;
       }
 
-      // no assets returned
       if (!result.assets || result.assets.length === 0) {
         setPhase("idle");
         return;
       }
 
       const asset = result.assets[0];
-
-      // asset itself undefined
-      if (!asset) {
-        setPhase("idle");
-        return;
-      }
-
-      // uri missing
-      if (!asset.uri) {
-        Alert.alert("Error", "Could not get image path. Try again.");
+      if (!asset || !asset.uri) {
         setPhase("idle");
         return;
       }
 
       let uri = asset.uri;
-
-      // android URI fix
       if (
         Platform.OS === "android" &&
         !uri.startsWith("file://") &&
@@ -98,26 +85,29 @@ export default function DriverCard({ onDataChange }: DriverCardProps) {
         uri = `file://${uri}`;
       }
 
+      processedUri = uri;
       setPhotoUri(uri);
 
-      // run OCR
+      // Run OCR
       const textResult = await TextRecognition.recognize(uri);
       const rawText = textResult?.text ?? "";
-
       const parsed = parseOCRText(rawText);
-      const cleaned = postProcess(parsed.data ?? {});
+
+      // Use parsed data directly; merge with empty driver to guarantee all fields
+      const cleaned: DriverData = {
+        ...EMPTY_DRIVER,
+        ...(parsed.data ?? {}),
+      };
 
       setData(cleaned);
       setPhase("done");
-
       onDataChange(cleaned, true, uri);
     } catch (err: any) {
       console.error("DriverCard error:", err?.message ?? err);
-      Alert.alert(
-        "Processing Failed",
-        "Could not read this image. Try a clearer photo."
-      );
-      setPhase("idle");
+      // If OCR fails (blurry image, etc.), silently fallback to blank card
+      setData(EMPTY_DRIVER);
+      setPhase("done");
+      onDataChange(EMPTY_DRIVER, true, processedUri);
     }
   }, [onDataChange]);
 
