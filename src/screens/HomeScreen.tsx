@@ -11,6 +11,7 @@ import React, {
 import {
   View,
   Text,
+  TextInput,
   StyleSheet,
   StatusBar,
   Image,
@@ -20,25 +21,27 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { launchImageLibrary } from "react-native-image-picker";
 import { BACKEND_URL } from "@env";
 import { useOfficer } from "../context/OfficerContext";
 import { useNetworkStatus } from "../helpers/network";
 import { useLiveClock } from "../hooks/useLiveClock";
-import { type DriverData } from "../helpers/constants";
-import DriverCard from "../features/home/DriverCard";
+import { type DriverData, FIELD_LIMITS } from "../helpers/constants";
 import { useBreathalyser } from "../context/BreathalyserContext";
 import { calculateFine } from "../helpers/fineCalculator";
 import { getToken } from "../security/secureStorage";
 
-// ─── Upload error messages ────────────────────────────────────────────────────
+// ── Upload error messages ──────────────────────────────
 
 const UploadErrors = {
   missingDriver: () =>
-    "Scan the driver licence and ensure all fields are present before uploading.",
+    "Please fill in all driver licence details before uploading.",
   missingBac: () =>
     "A breathalyser reading is required before uploading a record.",
   photoNotReady: () =>
     "The licence photo is still loading. Wait a moment and try again.",
+  noPhoto: () =>
+    "Attach a photo of the driver licence before uploading.",
   invalidBackendUrl: () =>
     "Server address is not configured. Contact your administrator.",
   noNetwork: () =>
@@ -53,7 +56,7 @@ const UploadErrors = {
     detail ? `Unexpected error: ${detail}` : "An unexpected error occurred.",
 } as const;
 
-// ─── Read photo into Blob (Android content:// safe) ───────────────────────────
+// ── Read photo into Blob (Android content:// safe) ───
 
 function readFileAsBlob(uri: string): Promise<Blob> {
   return new Promise<Blob>((resolve, reject) => {
@@ -74,7 +77,7 @@ function readFileAsBlob(uri: string): Promise<Blob> {
   });
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
+// ── Component ──────────────────────────────────────────
 
 export default function HomeScreen() {
   const { officer } = useOfficer();
@@ -82,22 +85,30 @@ export default function HomeScreen() {
   const { date, time } = useLiveClock();
   const { result: bacResult } = useBreathalyser();
 
-  const [driverValid, setDriverValid] = useState(false);
-  const [driverData, setDriverData] = useState<DriverData | null>(null);
-  const [photoUri, setPhotoUri] = useState<string | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
-  const [isBlobLoading, setIsBlobLoading] = useState(false);
-  const [showOcrBanner, setShowOcrBanner] = useState(false);
+  // ── Driver fields state ──────────────────────────────
+  const [surname, setSurname] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [dateOfBirth, setDateOfBirth] = useState("");
+  const [gender, setGender] = useState("");
+  const [idNumber, setIdNumber] = useState("");
+  const [licenceNumber, setLicenceNumber] = useState("");
+  const [licenceCode, setLicenceCode] = useState("");
+  const [issueDate, setIssueDate] = useState("");
+  const [expiryDate, setExpiryDate] = useState("");
 
+  // ── Photo state ─────────────────────────────────────
+  const [photoUri, setPhotoUri] = useState<string | null>(null);
+  const [isBlobLoading, setIsBlobLoading] = useState(false);
   const photoBlobRef = useRef<Blob | "error" | null>(null);
+
+  const [isUploading, setIsUploading] = useState(false);
   const uploadAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     return () => { uploadAbortRef.current?.abort(); };
   }, []);
 
-  // ── Pre-cache photo blob after OCR ──────────────────────────────────────────
-
+  // ── Pre-cache photo blob after pick ────────────────
   const precachePhotoBlob = useCallback((uri: string) => {
     photoBlobRef.current = null;
     setIsBlobLoading(true);
@@ -114,34 +125,74 @@ export default function HomeScreen() {
       });
   }, []);
 
-  // ── DriverCard callback ──────────────────────────────────────────────────────
+  // ── Pick photo from gallery ────────────────────────
+  const handlePickPhoto = useCallback(async () => {
+    try {
+      const result = await launchImageLibrary({
+        mediaType: "photo",
+        quality: 0.85,
+        includeBase64: false,
+      });
 
-  const handleDriverChange = useCallback(
-    (data: DriverData, isValid: boolean, uri: string | null) => {
-      setDriverValid(isValid);
-      setDriverData(data);
-      setPhotoUri(uri);
-      setShowOcrBanner(true); // always show banner after any OCR result
+      if (result.didCancel) return;
+      if (!result.assets || result.assets.length === 0) return;
 
-      if (uri) {
-        precachePhotoBlob(uri);
-      } else {
-        photoBlobRef.current = null;
-        setIsBlobLoading(false);
+      const asset = result.assets[0];
+      if (!asset?.uri) return;
+
+      let uri = asset.uri;
+      if (
+        Platform.OS === "android" &&
+        !uri.startsWith("file://") &&
+        !uri.startsWith("content://")
+      ) {
+        uri = `file://${uri}`;
       }
-    },
-    [precachePhotoBlob]
-  );
 
-  // ── Upload ───────────────────────────────────────────────────────────────────
+      setPhotoUri(uri);
+      precachePhotoBlob(uri);
+    } catch (err: any) {
+      Alert.alert("Error", "Could not access photo library.");
+    }
+  }, [precachePhotoBlob]);
 
+  // ── Check all required fields filled ───────────────
+  const driverValid =
+    surname.trim() !== "" &&
+    firstName.trim() !== "" &&
+    dateOfBirth.trim() !== "" &&
+    gender.trim() !== "" &&
+    idNumber.trim() !== "" &&
+    licenceNumber.trim() !== "" &&
+    licenceCode.trim() !== "" &&
+    issueDate.trim() !== "" &&
+    expiryDate.trim() !== "";
+
+  // ── Build DriverData object ────────────────────────
+  const buildDriverData = useCallback((): DriverData => ({
+    surname,
+    firstName,
+    dateOfBirth,
+    gender: gender.toUpperCase(),
+    idNumber,
+    licenceNumber,
+    licenceCode,
+    issueDate,
+    expiryDate,
+  }), [surname, firstName, dateOfBirth, gender, idNumber, licenceNumber, licenceCode, issueDate, expiryDate]);
+
+  // ── Upload logic ───────────────────────────────────
   const handleUpload = useCallback(async () => {
-    if (!driverValid || !driverData) {
-      Alert.alert("Driver Details Required", UploadErrors.missingDriver());
+    if (!driverValid) {
+      Alert.alert("Incomplete Details", UploadErrors.missingDriver());
       return;
     }
     if (!bacResult) {
       Alert.alert("BAC Reading Required", UploadErrors.missingBac());
+      return;
+    }
+    if (!photoUri) {
+      Alert.alert("Photo Missing", UploadErrors.noPhoto());
       return;
     }
     if (isBlobLoading) {
@@ -174,20 +225,10 @@ export default function HomeScreen() {
       const bacValue = parseFloat(bacResult.bacPercent.replace("%", ""));
       const fineInfo = calculateFine(bacValue);
 
+      const driverData = buildDriverData();
+
       const formData = new FormData();
-
-      formData.append("driverData", JSON.stringify({
-        surname:       driverData.surname,
-        firstName:     driverData.firstName,
-        dateOfBirth:   driverData.dateOfBirth,
-        gender:        driverData.gender,
-        idNumber:      driverData.idNumber,
-        licenceNumber: driverData.licenceNumber,
-        licenceCode:   driverData.licenceCode,
-        issueDate:     driverData.issueDate,
-        expiryDate:    driverData.expiryDate,
-      }));
-
+      formData.append("driverData", JSON.stringify(driverData));
       formData.append("bacData", JSON.stringify({
         bac:       bacValue.toFixed(3),
         timestamp: bacResult.timestamp,
@@ -196,7 +237,6 @@ export default function HomeScreen() {
         category:  fineInfo?.description ?? "N/A",
         officerId: officer?.officerId ?? "UNKNOWN",
       }));
-
       formData.append(
         "photo",
         photoBlobRef.current as Blob,
@@ -223,7 +263,6 @@ export default function HomeScreen() {
       }
 
       const body = await response.json();
-
       if (!response.ok) {
         const detail = body?.error ?? body?.message ?? body?.details;
         throw new Error(`SERVER:${detail ?? response.status}`);
@@ -243,7 +282,6 @@ export default function HomeScreen() {
       clearTimeout(timeoutHandle);
 
       let message: string;
-
       if (err.name === "AbortError") {
         message = UploadErrors.timeout();
       } else if (err.message === "NON_JSON") {
@@ -264,17 +302,9 @@ export default function HomeScreen() {
       setIsUploading(false);
       uploadAbortRef.current = null;
     }
-  }, [
-    driverValid,
-    driverData,
-    bacResult,
-    isBlobLoading,
-    isConnected,
-    officer,
-  ]);
+  }, [driverValid, bacResult, photoUri, isBlobLoading, isConnected, officer, buildDriverData]);
 
-  // ── Derived ──────────────────────────────────────────────────────────────────
-
+  // ── Derived ──────────────────────────────────────────
   const fineInfo = bacResult
     ? calculateFine(parseFloat(bacResult.bacPercent.replace("%", "")))
     : null;
@@ -282,18 +312,18 @@ export default function HomeScreen() {
   const uploadReady =
     driverValid &&
     !!bacResult &&
+    !!photoUri &&
     !isBlobLoading &&
     photoBlobRef.current instanceof Blob;
 
   const uploadButtonDisabled = !uploadReady || isUploading;
 
-  // ── Render ───────────────────────────────────────────────────────────────────
-
+  // ── Render ───────────────────────────────────────────
   return (
     <SafeAreaView style={s.root} edges={["top"]}>
       <StatusBar barStyle="light-content" backgroundColor="#121212" />
 
-      {/* Top bar */}
+      {/* Top bar – unchanged */}
       <View style={s.topBar}>
         <View style={s.logoWrap}>
           <Image
@@ -335,35 +365,130 @@ export default function HomeScreen() {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        {/* OCR warning banner — shown after any scan result */}
-        {showOcrBanner && (
-          <View style={s.ocrBanner}>
-            <Text style={s.ocrBannerIcon}>⚠️</Text>
-            <Text style={s.ocrBannerText}>
-              AI extraction is not perfect. Carefully check and correct
-              every field to match the physical licence before uploading.
+        {/* ── Manual Driver Licence Form ── */}
+        <View style={s.formCard}>
+          <Text style={s.formTitle}>Driver Licence Details</Text>
+
+          <Text style={s.label}>Surname</Text>
+          <TextInput
+            style={s.input}
+            value={surname}
+            onChangeText={setSurname}
+            maxLength={FIELD_LIMITS.surname}
+            placeholder="Enter surname"
+            placeholderTextColor="#555"
+          />
+
+          <Text style={s.label}>First Name</Text>
+          <TextInput
+            style={s.input}
+            value={firstName}
+            onChangeText={setFirstName}
+            maxLength={FIELD_LIMITS.firstName}
+            placeholder="Enter first name"
+            placeholderTextColor="#555"
+          />
+
+          <Text style={s.label}>Date of Birth (DD/MM/YYYY)</Text>
+          <TextInput
+            style={s.input}
+            value={dateOfBirth}
+            onChangeText={setDateOfBirth}
+            maxLength={10}
+            placeholder="DD/MM/YYYY"
+            placeholderTextColor="#555"
+            keyboardType="numbers-and-punctuation"
+          />
+
+          <Text style={s.label}>Gender (M / F)</Text>
+          <TextInput
+            style={s.input}
+            value={gender}
+            onChangeText={(t) => setGender(t.toUpperCase())}
+            maxLength={1}
+            placeholder="M or F"
+            placeholderTextColor="#555"
+          />
+
+          <Text style={s.label}>ID Number</Text>
+          <TextInput
+            style={s.input}
+            value={idNumber}
+            onChangeText={setIdNumber}
+            maxLength={FIELD_LIMITS.idNumber}
+            placeholder="e.g. 63-1234567A12"
+            placeholderTextColor="#555"
+          />
+
+          <Text style={s.label}>Licence Number</Text>
+          <TextInput
+            style={s.input}
+            value={licenceNumber}
+            onChangeText={setLicenceNumber}
+            maxLength={FIELD_LIMITS.licenceNumber}
+            placeholder="Enter licence number"
+            placeholderTextColor="#555"
+          />
+
+          <Text style={s.label}>Licence Code (e.g. B, CE, 4)</Text>
+          <TextInput
+            style={s.input}
+            value={licenceCode}
+            onChangeText={setLicenceCode}
+            maxLength={4}
+            placeholder="Code"
+            placeholderTextColor="#555"
+          />
+
+          <Text style={s.label}>Issue Date (DD/MM/YYYY)</Text>
+          <TextInput
+            style={s.input}
+            value={issueDate}
+            onChangeText={setIssueDate}
+            maxLength={10}
+            placeholder="DD/MM/YYYY"
+            placeholderTextColor="#555"
+            keyboardType="numbers-and-punctuation"
+          />
+
+          <Text style={s.label}>Expiry Date (DD/MM/YYYY)</Text>
+          <TextInput
+            style={s.input}
+            value={expiryDate}
+            onChangeText={setExpiryDate}
+            maxLength={10}
+            placeholder="DD/MM/YYYY"
+            placeholderTextColor="#555"
+            keyboardType="numbers-and-punctuation"
+          />
+
+          {/* Photo picker */}
+          <TouchableOpacity style={s.photoBtn} onPress={handlePickPhoto}>
+            <Text style={s.photoBtnText}>
+              {photoUri ? "📷  Change Licence Photo" : "📷  Attach Licence Photo"}
             </Text>
-            <TouchableOpacity
-              onPress={() => setShowOcrBanner(false)}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <Text style={s.ocrBannerClose}>✕</Text>
-            </TouchableOpacity>
-          </View>
-        )}
+          </TouchableOpacity>
 
-        {/* Driver card */}
-        <DriverCard onDataChange={handleDriverChange} />
+          {photoUri && (
+            <View style={s.previewContainer}>
+              <Image
+                source={{ uri: photoUri }}
+                style={s.previewImage}
+                resizeMode="contain"
+              />
+              <Text style={s.previewHint}>Licence photo attached</Text>
+            </View>
+          )}
 
-        {/* Photo blob loading indicator */}
-        {isBlobLoading && (
-          <View style={s.blobRow}>
-            <ActivityIndicator size="small" color="#1DB954" />
-            <Text style={s.blobText}>Securing photo for upload…</Text>
-          </View>
-        )}
+          {isBlobLoading && (
+            <View style={s.blobRow}>
+              <ActivityIndicator size="small" color="#1DB954" />
+              <Text style={s.blobText}>Preparing photo for upload…</Text>
+            </View>
+          )}
+        </View>
 
-        {/* BAC result */}
+        {/* BAC result – unchanged */}
         {bacResult && (
           <View style={s.bacSection}>
             <Text style={s.sectionLabel}>LATEST READING</Text>
@@ -416,7 +541,7 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* Upload button */}
+        {/* Upload button – unchanged */}
         <TouchableOpacity
           style={[s.uploadBtn, uploadButtonDisabled && s.uploadBtnOff]}
           onPress={handleUpload}
@@ -449,14 +574,18 @@ export default function HomeScreen() {
           )}
         </TouchableOpacity>
 
-        {/* Upload hints */}
-        {!driverValid && !isBlobLoading && (
-          <Text style={s.hint}>Scan driver licence to enable upload</Text>
+        {!driverValid && (
+          <Text style={s.hint}>
+            Complete all driver details and attach a licence photo
+          </Text>
         )}
         {driverValid && !bacResult && (
           <Text style={s.hint}>
             Capture a BAC reading to complete the record
           </Text>
+        )}
+        {driverValid && !!bacResult && !photoUri && (
+          <Text style={s.hint}>Attach the licence photo before uploading</Text>
         )}
 
         <Text style={s.legalNote}>
@@ -467,15 +596,12 @@ export default function HomeScreen() {
   );
 }
 
-// ─── Styles ──────────────────────────────────────────────────────────────────
-
+// ── Styles ────────────────────────────────────────────
 const s = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: "#121212",
   },
-
-  // top bar
   topBar: {
     flexDirection: "row",
     alignItems: "center",
@@ -550,43 +676,79 @@ const s = StyleSheet.create({
     fontSize: 10,
     fontWeight: "700",
   },
-
-  // scroll
   scroll: { flex: 1 },
   content: {
     padding: 12,
     paddingBottom: 40,
   },
 
-  // OCR banner
-  ocrBanner: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    backgroundColor: "rgba(220, 38, 38, 0.12)",
-    borderLeftWidth: 4,
-    borderLeftColor: "#DC2626",
-    borderRadius: 8,
-    marginBottom: 10,
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    gap: 8,
+  // Form card
+  formCard: {
+    backgroundColor: "#1a1a1a",
+    borderRadius: 16,
+    padding: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.05)",
   },
-  ocrBannerIcon: {
-    fontSize: 16,
-    marginTop: 1,
-  },
-  ocrBannerText: {
-    flex: 1,
-    color: "#FCA5A5",
-    fontSize: 12,
-    fontWeight: "600",
-    lineHeight: 18,
-  },
-  ocrBannerClose: {
-    color: "#DC2626",
+  formTitle: {
+    color: "#fff",
     fontSize: 16,
     fontWeight: "700",
-    paddingLeft: 4,
+    marginBottom: 12,
+  },
+  label: {
+    color: "#888",
+    fontSize: 10,
+    fontWeight: "600",
+    marginTop: 10,
+    marginBottom: 4,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  input: {
+    backgroundColor: "#111",
+    color: "#fff",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    fontSize: 14,
+    fontWeight: "500",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+  },
+  photoBtn: {
+    backgroundColor: "#1DB954",
+    paddingVertical: 14,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 16,
+  },
+  photoBtnText: {
+    color: "#000",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  previewContainer: {
+    marginTop: 12,
+    alignItems: "center",
+    borderRadius: 12,
+    overflow: "hidden",
+    backgroundColor: "#000",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+  },
+  previewImage: {
+    width: "100%",
+    aspectRatio: 1.58,
+  },
+  previewHint: {
+    color: "#555",
+    fontSize: 9,
+    marginTop: 6,
+    marginBottom: 8,
+    textAlign: "center",
   },
 
   // blob loading
@@ -596,7 +758,7 @@ const s = StyleSheet.create({
     gap: 8,
     paddingVertical: 6,
     paddingHorizontal: 4,
-    marginBottom: 4,
+    marginTop: 8,
   },
   blobText: {
     color: "#555",
@@ -605,7 +767,7 @@ const s = StyleSheet.create({
 
   // BAC section
   bacSection: {
-    marginTop: 16,
+    marginTop: 4,
     marginBottom: 8,
   },
   sectionLabel: {
