@@ -10,14 +10,13 @@ import helmet from "helmet";
 import compression from "compression";
 
 import { env } from "./config/env";
-import { connectMongo } from "./config/mongo"; // Ensures DB connects before server starts
+import { connectMongo } from "./config/mongo";
 import { initSocket } from "./config/socket";
 
 // Routes
 import authRoutes from "./routes/auth";
 import adminRoutes from "./routes/admin";
-// If you have upload routes separate from admin/auth, import them here:
-// import uploadRoutes from "./routes/upload"; 
+import uploadRoutes from "./routes/upload";   // 👈 Upload route (public – no auth required)
 
 const app = express();
 const httpServer = createServer(app);
@@ -31,7 +30,6 @@ app.use(helmet());
 app.use(compression());
 
 // CORS Configuration
-// Note: For production, replace "*" with your specific frontend URL(s)
 app.use(cors({ 
   origin: "*", 
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
@@ -39,7 +37,6 @@ app.use(cors({
 }));
 
 // Body Parsing
-// Increase limit if you are uploading large JSON payloads or base64 images
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -47,7 +44,7 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
-// app.use("/api", uploadRoutes); // Uncomment if you have a dedicated upload route file
+app.use("/api", uploadRoutes);                // 👈 POST /api/upload (public)
 
 // ─── Health Checks ───────────────────────────────────────────────────────────
 
@@ -104,7 +101,7 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 
 async function startServer() {
   try {
-    // 1. Connect to MongoDB (CRITICAL: Must happen before listening)
+    // 1. Connect to MongoDB
     console.log("🔄 Connecting to MongoDB...");
     await connectMongo();
     console.log("✅ MongoDB connected successfully");
@@ -114,7 +111,6 @@ async function startServer() {
     console.log("✅ Socket.IO initialized");
 
     // 3. Start HTTP Server
-    // Bind to 0.0.0.0 to accept connections from outside the container (Render/Docker)
     httpServer.listen(env.PORT, "0.0.0.0", () => {
       console.log(`🚀 [BlowSafe] Server running on port ${env.PORT}`);
       console.log(`📡 Environment: ${env.NODE_ENV}`);
@@ -129,18 +125,15 @@ async function startServer() {
 
 // ─── Process Event Handlers ──────────────────────────────────────────────────
 
-// Catch unhandled promise rejections
 process.on("unhandledRejection", (reason, promise) => {
   console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
 });
 
-// Catch uncaught exceptions
 process.on("uncaughtException", (err) => {
   console.error("❌ Uncaught Exception:", err);
   process.exit(1);
 });
 
-// Graceful shutdown for SIGTERM (Render/Kubernetes/Docker)
 process.on("SIGTERM", () => {
   console.log("🔄 SIGTERM received. Shutting down gracefully...");
   httpServer.close(() => {
