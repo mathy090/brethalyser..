@@ -1,15 +1,5 @@
 /**
  * src/screens/HomeScreen.tsx
- *
- * Home screen — Driver management, BAC result display & record upload.
- *
- * Photo handling
- * ──────────────
- * The licence photo is picked via react-native-image-picker. Because React
- * Native's FormData does not always reliably handle `content://` URIs on
- * Android, we read the picked file into a Blob via XMLHttpRequest immediately
- * after OCR completes. The blob is stored in a ref and appended to FormData
- * at upload time — safe regardless of Android's URI scheme.
  */
 
 import React, {
@@ -40,64 +30,45 @@ import { useBreathalyser } from "../context/BreathalyserContext";
 import { calculateFine } from "../helpers/fineCalculator";
 import { getToken } from "../security/secureStorage";
 
-// ─── Upload error catalogue ──────────────────────────────────────────────────
+// ─── Upload error messages ────────────────────────────────────────────────────
+
 const UploadErrors = {
-  missingDriver: (): string =>
+  missingDriver: () =>
     "Scan the driver licence and ensure all fields are present before uploading.",
-
-  missingBac: (): string =>
+  missingBac: () =>
     "A breathalyser reading is required before uploading a record.",
-
-  photoNotReady: (): string =>
+  photoNotReady: () =>
     "The licence photo is still loading. Wait a moment and try again.",
-
-  invalidBackendUrl: (): string =>
-    "Server address is not configured correctly. Contact your administrator.",
-
-  noNetwork: (): string =>
-    "No internet connection detected. Connect to a network and try again.",
-
-  timeout: (): string =>
+  invalidBackendUrl: () =>
+    "Server address is not configured. Contact your administrator.",
+  noNetwork: () =>
+    "No internet connection. Connect to a network and try again.",
+  timeout: () =>
     "The upload timed out. Check your connection and try again.",
-
-  serverBadResponse: (): string =>
-    "The server returned an unexpected response. Try again or contact support.",
-
-  serverRejected: (detail?: string): string =>
-    detail
-      ? `Upload rejected: ${detail}`
-      : "The server rejected the upload. Please try again.",
-
-  unexpected: (detail?: string): string =>
-    detail
-      ? `Unexpected error: ${detail}`
-      : "An unexpected error occurred. Please try again.",
+  serverBadResponse: () =>
+    "The server returned an unexpected response. Try again.",
+  serverRejected: (detail?: string) =>
+    detail ? `Upload rejected: ${detail}` : "The server rejected the upload.",
+  unexpected: (detail?: string) =>
+    detail ? `Unexpected error: ${detail}` : "An unexpected error occurred.",
 } as const;
 
-// ─── Photo blob reader ───────────────────────────────────────────────────────
+// ─── Read photo into Blob (Android content:// safe) ───────────────────────────
+
 function readFileAsBlob(uri: string): Promise<Blob> {
   return new Promise<Blob>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("GET", uri, true);
     xhr.responseType = "blob";
-
     xhr.onload = () => {
       if (xhr.status === 200 && xhr.response instanceof Blob) {
         resolve(xhr.response);
       } else {
-        reject(
-          new Error(
-            `XHR failed: status=${xhr.status}, type=${typeof xhr.response}`,
-          ),
-        );
+        reject(new Error(`XHR failed: status=${xhr.status}`));
       }
     };
-
-    xhr.onerror = () =>
-      reject(new Error("XHR network error reading local file"));
-    xhr.ontimeout = () =>
-      reject(new Error("XHR timeout reading local file"));
-
+    xhr.onerror = () => reject(new Error("XHR network error"));
+    xhr.ontimeout = () => reject(new Error("XHR timeout"));
     xhr.timeout = 8_000;
     xhr.send();
   });
@@ -111,27 +82,22 @@ export default function HomeScreen() {
   const { date, time } = useLiveClock();
   const { result: bacResult } = useBreathalyser();
 
-  // Driver state
   const [driverValid, setDriverValid] = useState(false);
   const [driverData, setDriverData] = useState<DriverData | null>(null);
   const [photoUri, setPhotoUri] = useState<string | null>(null);
-
-  // Upload state
   const [isUploading, setIsUploading] = useState(false);
-
-  // Photo blob pre‑cache
-  const photoBlobRef = useRef<Blob | "error" | null>(null);
   const [isBlobLoading, setIsBlobLoading] = useState(false);
+  const [showOcrBanner, setShowOcrBanner] = useState(false);
 
+  const photoBlobRef = useRef<Blob | "error" | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    return () => {
-      uploadAbortRef.current?.abort();
-    };
+    return () => { uploadAbortRef.current?.abort(); };
   }, []);
 
-  // ── Photo pre‑caching (triggered by DriverCard) ──────────────────────────
+  // ── Pre-cache photo blob after OCR ──────────────────────────────────────────
+
   const precachePhotoBlob = useCallback((uri: string) => {
     photoBlobRef.current = null;
     setIsBlobLoading(true);
@@ -140,22 +106,22 @@ export default function HomeScreen() {
       .then((blob) => {
         photoBlobRef.current = blob;
         setIsBlobLoading(false);
-        console.log(
-          `[HomeScreen] Photo blob cached — ${(blob.size / 1024).toFixed(1)} KB`,
-        );
       })
       .catch((err) => {
         photoBlobRef.current = "error";
         setIsBlobLoading(false);
-        console.warn("[HomeScreen] Photo blob pre‑cache failed:", err.message);
+        console.warn("[HomeScreen] Photo blob failed:", err.message);
       });
   }, []);
+
+  // ── DriverCard callback ──────────────────────────────────────────────────────
 
   const handleDriverChange = useCallback(
     (data: DriverData, isValid: boolean, uri: string | null) => {
       setDriverValid(isValid);
       setDriverData(data);
       setPhotoUri(uri);
+      setShowOcrBanner(true); // always show banner after any OCR result
 
       if (uri) {
         precachePhotoBlob(uri);
@@ -164,30 +130,26 @@ export default function HomeScreen() {
         setIsBlobLoading(false);
       }
     },
-    [precachePhotoBlob],
+    [precachePhotoBlob]
   );
 
-  // ── Upload record ────────────────────────────────────────────────────────
+  // ── Upload ───────────────────────────────────────────────────────────────────
+
   const handleUpload = useCallback(async () => {
-    // ── Pre-flight validation ──────────────────────────────────────────────
     if (!driverValid || !driverData) {
       Alert.alert("Driver Details Required", UploadErrors.missingDriver());
       return;
     }
-
     if (!bacResult) {
       Alert.alert("BAC Reading Required", UploadErrors.missingBac());
       return;
     }
-
     if (isBlobLoading) {
       Alert.alert("Photo Loading", UploadErrors.photoNotReady());
       return;
     }
-
-    // Photo blob must be available – button is disabled otherwise
     if (!(photoBlobRef.current instanceof Blob)) {
-      Alert.alert("Photo Unavailable", "The licence photo is not ready. Wait a moment or rescan.");
+      Alert.alert("Photo Unavailable", "Rescan the licence to retry.");
       return;
     }
 
@@ -196,23 +158,19 @@ export default function HomeScreen() {
       Alert.alert("Configuration Error", UploadErrors.invalidBackendUrl());
       return;
     }
-
     if (!isConnected) {
       Alert.alert("No Connection", UploadErrors.noNetwork());
       return;
     }
 
-    // ── Build payload ──────────────────────────────────────────────────────
     setIsUploading(true);
     uploadAbortRef.current = new AbortController();
-
     const timeoutHandle = setTimeout(() => {
       uploadAbortRef.current?.abort();
     }, 30_000);
 
     try {
       const token = await getToken();
-
       const bacValue = parseFloat(bacResult.bacPercent.replace("%", ""));
       const fineInfo = calculateFine(bacValue);
 
@@ -242,21 +200,18 @@ export default function HomeScreen() {
       formData.append(
         "photo",
         photoBlobRef.current as Blob,
-        `licence-${driverData.idNumber.replace(/\//g, "_")}.jpg`,
+        `licence-${driverData.idNumber.replace(/\//g, "_")}.jpg`
       );
 
       const headers: Record<string, string> = {
         Accept: "application/json",
       };
-
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-      }
+      if (token) headers["Authorization"] = `Bearer ${token}`;
 
       const response = await fetch(`${cleanBaseUrl}/api/upload`, {
-        method:  "POST",
-        body:    formData,
-        signal:  uploadAbortRef.current.signal,
+        method: "POST",
+        body:   formData,
+        signal: uploadAbortRef.current.signal,
         headers,
       });
 
@@ -270,25 +225,23 @@ export default function HomeScreen() {
       const body = await response.json();
 
       if (!response.ok) {
-        const detail: string | undefined =
-          body?.error ?? body?.message ?? body?.details;
+        const detail = body?.error ?? body?.message ?? body?.details;
         throw new Error(`SERVER:${detail ?? response.status}`);
       }
 
       Alert.alert(
-        "Record Uploaded",
+        "Record Uploaded ✓",
         [
           `Officer:  ${officer?.officerId ?? "—"}`,
           `Driver:   ${driverData.firstName} ${driverData.surname}`,
           `ID:       ${driverData.idNumber}`,
           `BAC:      ${bacResult.bacPercent}`,
           `Fine:     $${fineInfo?.amount ?? 0}`,
-        ].join("\n"),
+        ].join("\n")
       );
     } catch (err: any) {
       clearTimeout(timeoutHandle);
 
-      let title   = "Upload Failed";
       let message: string;
 
       if (err.name === "AbortError") {
@@ -306,7 +259,7 @@ export default function HomeScreen() {
         message = UploadErrors.unexpected(err.message);
       }
 
-      Alert.alert(title, message);
+      Alert.alert("Upload Failed", message);
     } finally {
       setIsUploading(false);
       uploadAbortRef.current = null;
@@ -320,7 +273,8 @@ export default function HomeScreen() {
     officer,
   ]);
 
-  // ── Derived values ───────────────────────────────────────────────────────
+  // ── Derived ──────────────────────────────────────────────────────────────────
+
   const fineInfo = bacResult
     ? calculateFine(parseFloat(bacResult.bacPercent.replace("%", "")))
     : null;
@@ -333,12 +287,13 @@ export default function HomeScreen() {
 
   const uploadButtonDisabled = !uploadReady || isUploading;
 
-  // ── Render ───────────────────────────────────────────────────────────────
+  // ── Render ───────────────────────────────────────────────────────────────────
+
   return (
     <SafeAreaView style={s.root} edges={["top"]}>
       <StatusBar barStyle="light-content" backgroundColor="#121212" />
 
-      {/* ── Top bar ──────────────────────────────────────────────────────── */}
+      {/* Top bar */}
       <View style={s.topBar}>
         <View style={s.logoWrap}>
           <Image
@@ -380,22 +335,39 @@ export default function HomeScreen() {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        {/* ── Driver card ─────────────────────────────────────────────────── */}
-        <DriverCard onDataChange={handleDriverChange} />
-
-        {/* ── Photo loading indicator ──────────────────────────────────────── */}
-        {isBlobLoading && (
-          <View style={s.blobLoadingRow}>
-            <ActivityIndicator size="small" color="#1DB954" />
-            <Text style={s.blobLoadingText}>Securing photo for upload…</Text>
+        {/* OCR warning banner — shown after any scan result */}
+        {showOcrBanner && (
+          <View style={s.ocrBanner}>
+            <Text style={s.ocrBannerIcon}>⚠️</Text>
+            <Text style={s.ocrBannerText}>
+              AI extraction is not perfect. Carefully check and correct
+              every field to match the physical licence before uploading.
+            </Text>
+            <TouchableOpacity
+              onPress={() => setShowOcrBanner(false)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={s.ocrBannerClose}>✕</Text>
+            </TouchableOpacity>
           </View>
         )}
 
-        {/* ── BAC result ───────────────────────────────────────────────────── */}
+        {/* Driver card */}
+        <DriverCard onDataChange={handleDriverChange} />
+
+        {/* Photo blob loading indicator */}
+        {isBlobLoading && (
+          <View style={s.blobRow}>
+            <ActivityIndicator size="small" color="#1DB954" />
+            <Text style={s.blobText}>Securing photo for upload…</Text>
+          </View>
+        )}
+
+        {/* BAC result */}
         {bacResult && (
           <View style={s.bacSection}>
             <Text style={s.sectionLabel}>LATEST READING</Text>
-            <View style={s.bacRow}>
+            <View style={s.bacCard}>
               <View
                 style={[
                   s.bacDot,
@@ -417,7 +389,7 @@ export default function HomeScreen() {
                 })}
               </Text>
               {fineInfo && (
-                <View style={s.fineContainer}>
+                <View style={s.fineWrap}>
                   <Text style={s.fineLabel}>Fine</Text>
                   <Text
                     style={[
@@ -439,58 +411,50 @@ export default function HomeScreen() {
               </Text>
             </View>
             {fineInfo && bacResult.overLimit && (
-              <Text style={s.fineDescription}>
-                Category: {fineInfo.description}
-              </Text>
+              <Text style={s.fineDesc}>Category: {fineInfo.description}</Text>
             )}
           </View>
         )}
 
-        {/* ── Upload button ─────────────────────────────────────────────────── */}
-        <View style={s.btnRow}>
-          <TouchableOpacity
-            style={[s.uploadBtn, uploadButtonDisabled && s.uploadBtnOff]}
-            onPress={handleUpload}
-            disabled={uploadButtonDisabled}
-            activeOpacity={0.85}
-          >
-            {isUploading ? (
-              <View style={s.uploadingRow}>
-                <ActivityIndicator color="#1DB954" size="small" />
-                <Text style={[s.uploadBtnText, s.uploadBtnTextActive]}>
-                  Uploading…
-                </Text>
-              </View>
-            ) : isBlobLoading ? (
-              <View style={s.uploadingRow}>
-                <ActivityIndicator color="#555" size="small" />
-                <Text style={[s.uploadBtnText, s.uploadBtnTextOff]}>
-                  Preparing…
-                </Text>
-              </View>
-            ) : (
-              <Text
-                style={[
-                  s.uploadBtnText,
-                  uploadButtonDisabled
-                    ? s.uploadBtnTextOff
-                    : s.uploadBtnTextActive,
-                ]}
-              >
-                Upload Record
+        {/* Upload button */}
+        <TouchableOpacity
+          style={[s.uploadBtn, uploadButtonDisabled && s.uploadBtnOff]}
+          onPress={handleUpload}
+          disabled={uploadButtonDisabled}
+          activeOpacity={0.85}
+        >
+          {isUploading ? (
+            <View style={s.uploadRow}>
+              <ActivityIndicator color="#1DB954" size="small" />
+              <Text style={[s.uploadText, { color: "#1DB954" }]}>
+                Uploading…
               </Text>
-            )}
-          </TouchableOpacity>
-        </View>
+            </View>
+          ) : isBlobLoading ? (
+            <View style={s.uploadRow}>
+              <ActivityIndicator color="#555" size="small" />
+              <Text style={[s.uploadText, { color: "#555" }]}>
+                Preparing…
+              </Text>
+            </View>
+          ) : (
+            <Text
+              style={[
+                s.uploadText,
+                { color: uploadButtonDisabled ? "#333" : "#1DB954" },
+              ]}
+            >
+              Upload Record
+            </Text>
+          )}
+        </TouchableOpacity>
 
+        {/* Upload hints */}
         {!driverValid && !isBlobLoading && (
-          <Text style={s.uploadHint}>
-            Scan driver licence to enable upload
-          </Text>
+          <Text style={s.hint}>Scan driver licence to enable upload</Text>
         )}
-
         {driverValid && !bacResult && (
-          <Text style={s.uploadHint}>
+          <Text style={s.hint}>
             Capture a BAC reading to complete the record
           </Text>
         )}
@@ -504,216 +468,242 @@ export default function HomeScreen() {
 }
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
+
 const s = StyleSheet.create({
   root: {
-    flex:            1,
+    flex: 1,
     backgroundColor: "#121212",
   },
+
+  // top bar
   topBar: {
-    flexDirection:    "row",
-    alignItems:       "center",
-    justifyContent:   "space-between",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: 14,
-    paddingVertical:   8,
+    paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: "rgba(255,255,255,0.05)",
   },
   logoWrap: {
-    width:        36,
-    height:       36,
+    width: 36,
+    height: 36,
     borderRadius: 18,
-    overflow:     "hidden",
-    borderWidth:  1.5,
-    borderColor:  "#1DB954",
+    overflow: "hidden",
+    borderWidth: 1.5,
+    borderColor: "#1DB954",
   },
   logo: {
-    width:      "100%",
-    height:     "100%",
+    width: "100%",
+    height: "100%",
     resizeMode: "cover",
   },
   island: {
-    flexDirection:    "row",
-    alignItems:       "center",
-    gap:              8,
-    backgroundColor:  "#1a1a1a",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#1a1a1a",
     paddingHorizontal: 16,
-    paddingVertical:   8,
-    borderRadius:     30,
-    borderWidth:      1,
-    borderColor:      "rgba(255,255,255,0.07)",
-    elevation:        6,
+    paddingVertical: 8,
+    borderRadius: 30,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.07)",
   },
   islandName: {
-    color:       "#1DB954",
-    fontSize:    13,
-    fontWeight:  "800",
+    color: "#1DB954",
+    fontSize: 13,
+    fontWeight: "800",
     letterSpacing: 1,
   },
   islandDivider: {
-    width:           1,
-    height:          14,
+    width: 1,
+    height: 14,
     backgroundColor: "rgba(255,255,255,0.1)",
   },
   islandClock: {
     alignItems: "flex-start",
   },
   islandTime: {
-    color:        "#fff",
-    fontSize:     13,
-    fontWeight:   "700",
-    fontVariant:  ["tabular-nums"],
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "700",
     letterSpacing: 0.5,
   },
   islandDate: {
-    color:     "#555",
-    fontSize:  9,
+    color: "#555",
+    fontSize: 9,
     fontWeight: "500",
   },
   statusPill: {
-    flexDirection:  "row",
-    alignItems:     "center",
-    gap:            4,
-    width:          64,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    width: 64,
     justifyContent: "flex-end",
   },
   statusDot: {
-    width:        7,
-    height:       7,
+    width: 7,
+    height: 7,
     borderRadius: 3.5,
   },
   statusText: {
-    fontSize:   10,
+    fontSize: 10,
     fontWeight: "700",
   },
-  scroll: {
-    flex: 1,
-  },
+
+  // scroll
+  scroll: { flex: 1 },
   content: {
-    padding:       12,
+    padding: 12,
     paddingBottom: 40,
   },
-  blobLoadingRow: {
-    flexDirection:  "row",
-    alignItems:     "center",
-    gap:            8,
+
+  // OCR banner
+  ocrBanner: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    backgroundColor: "rgba(220, 38, 38, 0.12)",
+    borderLeftWidth: 4,
+    borderLeftColor: "#DC2626",
+    borderRadius: 8,
+    marginBottom: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    gap: 8,
+  },
+  ocrBannerIcon: {
+    fontSize: 16,
+    marginTop: 1,
+  },
+  ocrBannerText: {
+    flex: 1,
+    color: "#FCA5A5",
+    fontSize: 12,
+    fontWeight: "600",
+    lineHeight: 18,
+  },
+  ocrBannerClose: {
+    color: "#DC2626",
+    fontSize: 16,
+    fontWeight: "700",
+    paddingLeft: 4,
+  },
+
+  // blob loading
+  blobRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
     paddingVertical: 6,
     paddingHorizontal: 4,
-    marginBottom:   4,
+    marginBottom: 4,
   },
-  blobLoadingText: {
-    color:    "#555",
+  blobText: {
+    color: "#555",
     fontSize: 11,
   },
+
+  // BAC section
   bacSection: {
-    marginTop:    16,
+    marginTop: 16,
     marginBottom: 8,
   },
   sectionLabel: {
-    color:        "#444",
-    fontSize:     10,
-    fontWeight:   "700",
+    color: "#444",
+    fontSize: 10,
+    fontWeight: "700",
     letterSpacing: 1.5,
     marginBottom: 8,
-    marginLeft:   4,
+    marginLeft: 4,
   },
-  bacRow: {
-    flexDirection:    "row",
-    alignItems:       "center",
-    backgroundColor:  "#1a1a1a",
-    paddingVertical:  12,
+  bacCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#1a1a1a",
+    paddingVertical: 12,
     paddingHorizontal: 12,
-    borderRadius:     12,
-    borderWidth:      1,
-    borderColor:      "rgba(255,255,255,0.05)",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.05)",
   },
   bacDot: {
-    width:        8,
-    height:       8,
+    width: 8,
+    height: 8,
     borderRadius: 4,
-    marginRight:  10,
+    marginRight: 10,
   },
   bacValue: {
-    width:        50,
-    fontSize:     16,
-    fontWeight:   "800",
+    width: 50,
+    fontSize: 16,
+    fontWeight: "800",
     letterSpacing: 0.5,
   },
   bacTime: {
-    color:       "#666",
-    fontSize:    12,
-    fontWeight:  "500",
+    color: "#666",
+    fontSize: 12,
+    fontWeight: "500",
     marginRight: 8,
-    fontVariant: ["tabular-nums"],
   },
-  fineContainer: {
+  fineWrap: {
     marginRight: 8,
-    alignItems:  "flex-start",
+    alignItems: "flex-start",
   },
   fineLabel: {
-    color:     "#888",
-    fontSize:  9,
+    color: "#888",
+    fontSize: 9,
     fontWeight: "600",
   },
   fineValue: {
-    fontSize:  14,
+    fontSize: 14,
     fontWeight: "800",
   },
   bacStatus: {
-    fontSize:     11,
-    fontWeight:   "800",
+    fontSize: 11,
+    fontWeight: "800",
     letterSpacing: 0.5,
-    width:        70,
-    textAlign:    "right",
+    flex: 1,
+    textAlign: "right",
   },
-  fineDescription: {
-    color:      "#FFA500",
-    fontSize:   10,
-    marginTop:  4,
+  fineDesc: {
+    color: "#FFA500",
+    fontSize: 10,
+    marginTop: 4,
     marginLeft: 22,
-    fontStyle:  "italic",
+    fontStyle: "italic",
   },
-  btnRow: {
-    flexDirection: "row",
-    gap:           12,
-    marginBottom:  8,
-    marginTop:     10,
-  },
+
+  // upload
   uploadBtn: {
-    flex:            1,
     paddingVertical: 16,
-    borderRadius:    14,
-    alignItems:      "center",
-    justifyContent:  "center",
-    borderWidth:     1.5,
-    borderColor:     "#1DB954",
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1.5,
+    borderColor: "#1DB954",
+    marginTop: 10,
+    marginBottom: 8,
   },
   uploadBtnOff: {
     borderColor: "#2a2a2a",
   },
-  uploadingRow: {
+  uploadRow: {
     flexDirection: "row",
-    alignItems:    "center",
-    gap:           8,
+    alignItems: "center",
+    gap: 8,
   },
-  uploadBtnText: {
-    fontSize:   15,
+  uploadText: {
+    fontSize: 15,
     fontWeight: "700",
   },
-  uploadBtnTextActive: {
-    color: "#1DB954",
-  },
-  uploadBtnTextOff: {
-    color: "#333",
-  },
-  uploadHint: {
-    color:     "#444",
-    fontSize:  10,
+  hint: {
+    color: "#444",
+    fontSize: 10,
     textAlign: "center",
     marginTop: 4,
   },
   legalNote: {
-    color:     "#2a2a2a",
-    fontSize:  9,
+    color: "#2a2a2a",
+    fontSize: 9,
     textAlign: "center",
     marginTop: 12,
   },
