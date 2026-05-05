@@ -16,38 +16,30 @@ import { initSocket } from "./config/socket";
 // Routes
 import authRoutes from "./routes/auth";
 import adminRoutes from "./routes/admin";
-import uploadRoutes from "./routes/upload";   // 👈 Upload route (public – no auth required)
+import uploadRoutes from "./routes/upload";      // POST /api/upload (public)
+import recordsRoutes from "./routes/records";    // GET  /api/records (public)
 
 const app = express();
 const httpServer = createServer(app);
 
 // ─── Middleware ──────────────────────────────────────────────────────────────
-
-// Security headers
 app.use(helmet());
-
-// Compression for response bodies
 app.use(compression());
-
-// CORS Configuration
 app.use(cors({ 
   origin: "*", 
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
-
-// Body Parsing
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
-
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
-app.use("/api", uploadRoutes);                // 👈 POST /api/upload (public)
+app.use("/api", uploadRoutes);     // POST /api/upload
+app.use("/api", recordsRoutes);    // GET  /api/records
 
 // ─── Health Checks ───────────────────────────────────────────────────────────
-
 app.get("/", (_req, res) => {
   res.json({ 
     status: "ok", 
@@ -66,7 +58,6 @@ app.get("/health", (_req, res) => {
 });
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
-
 app.use((_req, res) => {
   res.status(404).json({
     message: "Endpoint not found",
@@ -76,18 +67,12 @@ app.use((_req, res) => {
 });
 
 // ─── Global Error Handler ────────────────────────────────────────────────────
-
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error("❌ Unhandled error:", err);
-
   const isProduction = env.NODE_ENV === "production";
 
-  // Handle Mongoose Validation Errors specifically if needed
   if (err.name === 'ValidationError') {
-    return res.status(400).json({
-      message: "Validation Error",
-      errors: err.errors
-    });
+    return res.status(400).json({ message: "Validation Error", errors: err.errors });
   }
 
   res.status(500).json({
@@ -98,51 +83,39 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 });
 
 // ─── Server Startup ──────────────────────────────────────────────────────────
-
 async function startServer() {
   try {
-    // 1. Connect to MongoDB
     console.log("🔄 Connecting to MongoDB...");
     await connectMongo();
     console.log("✅ MongoDB connected successfully");
 
-    // 2. Initialize Socket.IO
     initSocket(httpServer);
     console.log("✅ Socket.IO initialized");
 
-    // 3. Start HTTP Server
     httpServer.listen(env.PORT, "0.0.0.0", () => {
       console.log(`🚀 [BlowSafe] Server running on port ${env.PORT}`);
       console.log(`📡 Environment: ${env.NODE_ENV}`);
       console.log(`🔗 API Base: ${process.env.API_BASE_URL || `http://localhost:${env.PORT}`}`);
     });
-
   } catch (error) {
     console.error("❌ Failed to start server:", error);
     process.exit(1);
   }
 }
 
-// ─── Process Event Handlers ──────────────────────────────────────────────────
-
+// ─── Process Handlers ────────────────────────────────────────────────────────
 process.on("unhandledRejection", (reason, promise) => {
   console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
 });
-
 process.on("uncaughtException", (err) => {
   console.error("❌ Uncaught Exception:", err);
   process.exit(1);
 });
-
 process.on("SIGTERM", () => {
   console.log("🔄 SIGTERM received. Shutting down gracefully...");
-  httpServer.close(() => {
-    console.log("✅ Server closed.");
-    process.exit(0);
-  });
+  httpServer.close(() => { console.log("✅ Server closed."); process.exit(0); });
 });
 
-// Start the application
 startServer();
 
 export { app, httpServer };
