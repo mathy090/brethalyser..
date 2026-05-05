@@ -1,10 +1,16 @@
 // src/features/home/DriverCard.tsx
 import React, { useState, useCallback } from "react";
 import {
-  View, Text, StyleSheet, TouchableOpacity, Image,
-  Alert, ActivityIndicator, Platform
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  Image,
+  Alert,
+  ActivityIndicator,
+  Platform,
 } from "react-native";
-import { launchImageLibrary } from "react-native-image-picker";   // ✅ new import
+import { launchImageLibrary } from "react-native-image-picker";
 import TextRecognition from "@react-native-ml-kit/text-recognition";
 
 import { parseOCRText } from "../../helpers/ocrParser";
@@ -13,59 +19,33 @@ import { type DriverData, FIELD_LIMITS } from "../../helpers/constants";
 import DataRow from "./DataRow";
 
 interface DriverCardProps {
-  onDataChange: (data: DriverData, isValid: boolean, photoUri: string | null) => void;
+  onDataChange: (
+    data: DriverData,
+    isValid: boolean,
+    photoUri: string | null
+  ) => void;
 }
 
-// ─── Native-looking Gallery Icon ─────────────────────────────────────────
-const GalleryIcon = () => (
-  <View style={iconStyles.container}>
-    <View style={iconStyles.frame} />
-    <View style={iconStyles.mountain1} />
-    <View style={iconStyles.mountain2} />
-    <View style={iconStyles.sun} />
-  </View>
-);
-
-const iconStyles = StyleSheet.create({
-  container: { width: 18, height: 18, marginRight: 8 },
-  frame: {
-    position: "absolute",
-    width: 16, height: 16,
-    borderWidth: 1.5, borderColor: "#000",
-    borderRadius: 3,
-    backgroundColor: "#fff",
-  },
-  mountain1: {
-    position: "absolute", bottom: 2, left: 2,
-    width: 0, height: 0,
-    borderLeftWidth: 4, borderLeftColor: "transparent",
-    borderRightWidth: 4, borderRightColor: "transparent",
-    borderBottomWidth: 5, borderBottomColor: "#333",
-  },
-  mountain2: {
-    position: "absolute", bottom: 2, left: 6,
-    width: 0, height: 0,
-    borderLeftWidth: 5, borderLeftColor: "transparent",
-    borderRightWidth: 5, borderRightColor: "transparent",
-    borderBottomWidth: 6, borderBottomColor: "#555",
-  },
-  sun: {
-    position: "absolute", top: 2.5, right: 2.5,
-    width: 3, height: 3,
-    borderRadius: 1.5,
-    backgroundColor: "#FFA500",
-  },
-});
+const EMPTY_DRIVER: DriverData = {
+  surname: "",
+  firstName: "",
+  dateOfBirth: "",
+  gender: "",
+  idNumber: "",
+  licenceNumber: "",
+  licenceCode: "",
+  issueDate: "",
+  expiryDate: "",
+};
 
 export default function DriverCard({ onDataChange }: DriverCardProps) {
-  const [data, setData] = useState<Partial<DriverData>>({});
+  const [data, setData] = useState<DriverData>(EMPTY_DRIVER);
   const [phase, setPhase] = useState<"idle" | "processing" | "done">("idle");
   const [photoUri, setPhotoUri] = useState<string | null>(null);
-  const [retaking, setRetaking] = useState(false);
 
   const handleChange = useCallback(
     (key: keyof DriverData, val: string) => {
-      setData(prev => ({ ...prev, [key]: val }));
+      setData((prev) => ({ ...prev, [key]: val }));
     },
     []
   );
@@ -80,51 +60,80 @@ export default function DriverCard({ onDataChange }: DriverCardProps) {
         includeBase64: false,
       });
 
-      if (result.didCancel || !result.assets?.length) {
+      // user cancelled
+      if (result.didCancel) {
+        setPhase("idle");
+        return;
+      }
+
+      // no assets returned
+      if (!result.assets || result.assets.length === 0) {
         setPhase("idle");
         return;
       }
 
       const asset = result.assets[0];
-      let uri = asset.uri ?? "";
 
-      // ML Kit requires file:// on older Android; content:// works on RN ≥0.65
-      if (Platform.OS === "android" && !uri.startsWith("file://") && !uri.startsWith("content://")) {
+      // asset itself undefined
+      if (!asset) {
+        setPhase("idle");
+        return;
+      }
+
+      // uri missing
+      if (!asset.uri) {
+        Alert.alert("Error", "Could not get image path. Try again.");
+        setPhase("idle");
+        return;
+      }
+
+      let uri = asset.uri;
+
+      // android URI fix
+      if (
+        Platform.OS === "android" &&
+        !uri.startsWith("file://") &&
+        !uri.startsWith("content://")
+      ) {
         uri = `file://${uri}`;
       }
 
       setPhotoUri(uri);
 
+      // run OCR
       const textResult = await TextRecognition.recognize(uri);
-      const parsed = parseOCRText(textResult.text);
-      const cleaned = postProcess(parsed.data);
+      const rawText = textResult?.text ?? "";
+
+      const parsed = parseOCRText(rawText);
+      const cleaned = postProcess(parsed.data ?? {});
 
       setData(cleaned);
       setPhase("done");
 
-      // Notify HomeScreen (validation & upload)
       onDataChange(cleaned, true, uri);
     } catch (err: any) {
-      console.error("Gallery/OCR error:", err);
-      Alert.alert("Processing Failed", "Could not extract text from this image.");
+      console.error("DriverCard error:", err?.message ?? err);
+      Alert.alert(
+        "Processing Failed",
+        "Could not read this image. Try a clearer photo."
+      );
       setPhase("idle");
     }
   }, [onDataChange]);
 
   const handleRetake = useCallback(() => {
-    setRetaking(true);
-    setData({});
+    setData(EMPTY_DRIVER);
     setPhotoUri(null);
     setPhase("idle");
-    setRetaking(false);
-  }, []);
+    onDataChange(EMPTY_DRIVER, false, null);
+  }, [onDataChange]);
 
   return (
     <View style={styles.card}>
       {phase === "done" && (
         <View style={styles.banner}>
           <Text style={styles.bannerText}>
-            AI can make mistakes. Double check the details before upload.
+            AI can make mistakes. Double check details before upload.
           </Text>
         </View>
       )}
@@ -132,7 +141,7 @@ export default function DriverCard({ onDataChange }: DriverCardProps) {
       <View style={styles.header}>
         <Text style={styles.title}>Driver Licence</Text>
         {phase === "done" && (
-          <TouchableOpacity onPress={handleRetake} disabled={retaking}>
+          <TouchableOpacity onPress={handleRetake}>
             <Text style={styles.retakeText}>🔄 Rescan</Text>
           </TouchableOpacity>
         )}
@@ -140,8 +149,7 @@ export default function DriverCard({ onDataChange }: DriverCardProps) {
 
       {phase === "idle" && (
         <TouchableOpacity onPress={handlePickImage} style={styles.pickBtn}>
-          <GalleryIcon />
-          <Text style={styles.pickBtnText}>Choose from Gallery</Text>
+          <Text style={styles.pickBtnText}>📷  Choose from Gallery</Text>
         </TouchableOpacity>
       )}
 
@@ -154,15 +162,74 @@ export default function DriverCard({ onDataChange }: DriverCardProps) {
 
       {phase === "done" && (
         <View style={styles.fieldsGrid}>
-          <DataRow label="Surname" value={data.surname ?? ""} editable onChange={(val) => handleChange("surname", val)} maxLength={FIELD_LIMITS.surname} />
-          <DataRow label="First Name" value={data.firstName ?? ""} editable onChange={(val) => handleChange("firstName", val)} maxLength={FIELD_LIMITS.firstName} />
-          <DataRow label="DOB" value={data.dateOfBirth ?? ""} placeholder="DD/MM" editable onChange={(val) => handleChange("dateOfBirth", val)} maxLength={10} />
-          <DataRow label="Gender" value={data.gender ?? ""} placeholder="M/F" editable onChange={(val) => handleChange("gender", val.toUpperCase())} maxLength={1} />
-          <DataRow label="ID Number" value={data.idNumber ?? ""} editable onChange={(val) => handleChange("idNumber", val)} maxLength={FIELD_LIMITS.idNumber} />
-          <DataRow label="Licence No" value={data.licenceNumber ?? ""} editable onChange={(val) => handleChange("licenceNumber", val)} maxLength={FIELD_LIMITS.licenceNumber} />
-          <DataRow label="Code" value={data.licenceCode ?? ""} placeholder="B/CE/4" editable onChange={(val) => handleChange("licenceCode", val)} maxLength={4} />
-          <DataRow label="Issue" value={data.issueDate ?? ""} placeholder="DD/MM" editable onChange={(val) => handleChange("issueDate", val)} maxLength={10} />
-          <DataRow label="Expiry" value={data.expiryDate ?? ""} placeholder="DD/MM" editable onChange={(val) => handleChange("expiryDate", val)} maxLength={10} />
+          <DataRow
+            label="Surname"
+            value={data.surname}
+            editable
+            onChange={(val) => handleChange("surname", val)}
+            maxLength={FIELD_LIMITS.surname}
+          />
+          <DataRow
+            label="First Name"
+            value={data.firstName}
+            editable
+            onChange={(val) => handleChange("firstName", val)}
+            maxLength={FIELD_LIMITS.firstName}
+          />
+          <DataRow
+            label="DOB"
+            value={data.dateOfBirth}
+            placeholder="DD/MM/YYYY"
+            editable
+            onChange={(val) => handleChange("dateOfBirth", val)}
+            maxLength={10}
+          />
+          <DataRow
+            label="Gender"
+            value={data.gender}
+            placeholder="M / F"
+            editable
+            onChange={(val) => handleChange("gender", val.toUpperCase())}
+            maxLength={1}
+          />
+          <DataRow
+            label="ID Number"
+            value={data.idNumber}
+            editable
+            onChange={(val) => handleChange("idNumber", val)}
+            maxLength={FIELD_LIMITS.idNumber}
+          />
+          <DataRow
+            label="Licence No"
+            value={data.licenceNumber}
+            editable
+            onChange={(val) => handleChange("licenceNumber", val)}
+            maxLength={FIELD_LIMITS.licenceNumber}
+          />
+          <DataRow
+            label="Code"
+            value={data.licenceCode}
+            placeholder="B / CE / 4"
+            editable
+            onChange={(val) => handleChange("licenceCode", val)}
+            maxLength={4}
+          />
+          <DataRow
+            label="Issue Date"
+            value={data.issueDate}
+            placeholder="DD/MM/YYYY"
+            editable
+            onChange={(val) => handleChange("issueDate", val)}
+            maxLength={10}
+          />
+          <DataRow
+            label="Expiry Date"
+            value={data.expiryDate}
+            placeholder="DD/MM/YYYY"
+            editable
+            onChange={(val) => handleChange("expiryDate", val)}
+            maxLength={10}
+          />
 
           {photoUri && (
             <View style={styles.previewContainer}>
@@ -182,7 +249,6 @@ export default function DriverCard({ onDataChange }: DriverCardProps) {
   );
 }
 
-// ─── Styles (identical to original) ──────────────────────────────────────
 const styles = StyleSheet.create({
   card: {
     backgroundColor: "#1a1a1a",
@@ -199,8 +265,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 8,
   },
-  title: { color: "#fff", fontSize: 16, fontWeight: "700" },
-  retakeText: { color: "#1DB954", fontSize: 12, fontWeight: "600" },
+  title: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  retakeText: {
+    color: "#1DB954",
+    fontSize: 12,
+    fontWeight: "600",
+  },
   banner: {
     backgroundColor: "rgba(255,165,0,0.15)",
     borderLeftWidth: 3,
@@ -210,16 +284,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     marginBottom: 12,
   },
-  bannerText: { color: "#FFA500", fontSize: 11, fontWeight: "600" },
+  bannerText: {
+    color: "#FFA500",
+    fontSize: 11,
+    fontWeight: "600",
+  },
   pickBtn: {
     backgroundColor: "#1DB954",
     paddingVertical: 14,
     borderRadius: 10,
     alignItems: "center",
-    flexDirection: "row",
     justifyContent: "center",
   },
-  pickBtnText: { color: "#000", fontSize: 14, fontWeight: "700" },
+  pickBtnText: {
+    color: "#000",
+    fontSize: 14,
+    fontWeight: "700",
+  },
   processingRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -227,9 +308,20 @@ const styles = StyleSheet.create({
     paddingVertical: 20,
     justifyContent: "center",
   },
-  processingText: { color: "#888", fontSize: 12 },
-  fieldsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  previewContainer: { marginTop: 12, alignItems: "center", width: "100%" },
+  processingText: {
+    color: "#888",
+    fontSize: 12,
+  },
+  fieldsGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  previewContainer: {
+    marginTop: 12,
+    alignItems: "center",
+    width: "100%",
+  },
   previewFrame: {
     width: "100%",
     aspectRatio: 1.58,
@@ -239,6 +331,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.1)",
   },
-  previewImage: { width: "100%", height: "100%" },
-  previewHint: { color: "#555", fontSize: 9, marginTop: 6, textAlign: "center" },
+  previewImage: {
+    width: "100%",
+    height: "100%",
+  },
+  previewHint: {
+    color: "#555",
+    fontSize: 9,
+    marginTop: 6,
+    textAlign: "center",
+  },
 });
