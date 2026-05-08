@@ -1,46 +1,37 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- ================= CORE ================= -->
-
-    <!-- Internet -->
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- Camera (Vision Camera + OCR scanning) -->
+    <!-- ================= CAMERA (Vision / OCR / Expo Camera) ================= -->
     <uses-permission android:name="android.permission.CAMERA" />
 
     <!-- ================= STORAGE / MEDIA ================= -->
-
-    <!-- Pre-Android 13 storage -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" />
-
-    <!-- Android 13+ media access -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 
-    <!-- ================= LOCATION (Bluetooth scanning dependency) ================= -->
+    <!-- ================= BLUETOOTH (react-native-ble-plx + bluetooth-classic) ================= -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
 
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+
+    <!-- Required for BLE scanning -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- ================= BLUETOOTH ================= -->
+    <!-- ================= NOTIFICATIONS (Firebase Messaging) ================= -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Android 12+ -->
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
-        android:usesPermissionFlags="neverForLocation" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- ================= FILE SYSTEM (react-native-fs) ================= -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
-    <!-- Android <= 11 -->
-    <uses-permission android:name="android.permission.BLUETOOTH"
-        android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
-        android:maxSdkVersion="30" />
-
-    <!-- ================= OPTIONAL PERFORMANCE FLAGS ================= -->
-
-    <!-- Better camera + ML Kit OCR performance -->
+    <!-- ================= FEATURES ================= -->
     <uses-feature android:name="android.hardware.camera" android:required="true" />
-    <uses-feature android:name="android.hardware.camera.autofocus" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
     <application
         android:name=".MainApplication"
@@ -49,14 +40,12 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:allowBackup="false"
         android:theme="@style/AppTheme"
-        android:usesCleartextTraffic="${usesCleartextTraffic}"
+        android:usesCleartextTraffic="true"
         android:supportsRtl="true"
         android:hardwareAccelerated="true">
 
-        <!-- Vision Camera / Native modules safety -->
-        <uses-library
-            android:name="org.apache.http.legacy"
-            android:required="false" />
+        <!-- Required for some native modules -->
+        <uses-library android:name="org.apache.http.legacy" android:required="false" />
 
         <activity
             android:name=".MainActivity"

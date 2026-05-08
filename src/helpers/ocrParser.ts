@@ -1,212 +1,176 @@
 // src/helpers/ocrParser.ts
-import TextRecognition from "@react-native-ml-kit/text-recognition";
-import { type DriverData, FIELD_LIMITS } from "./constants";
+// Never rejects. Always extracts what it can. Empty string for anything not found.
 
-// ─────────────────────────────────────────────
-// CLEANING (OCR NOISE FIX)
-// ─────────────────────────────────────────────
-function cleanText(raw: string): string {
-  return raw
-    .replace(/[|\\]/g, "/")
-    .replace(/O(?=\d)/g, "0")
-    .replace(/I(?=\d)/g, "1")
-    .replace(/\s+/g, " ")
-    .replace(/[^\w\s\/:-]/g, "")
+import { type DriverData } from "./constants";
+
+export interface ParseResult {
+  data: Partial<DriverData>;
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function clean(text: string): string {
+  return text
+    .replace(/[|}{[\]]/g, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/0(?=[a-zA-Z])|(?<=[a-zA-Z])0/g, "O") // fix 0→O next to letters
+    .replace(/l(?=\d)|(?<=\d)l/g, "1")              // fix l→1 next to digits
     .trim();
 }
 
-// ─────────────────────────────────────────────
-// FUZZY LABEL MATCHING
-// ─────────────────────────────────────────────
-function matches(line: string, keys: string[]) {
-  const l = line.toLowerCase();
-  return keys.some(k => l.includes(k));
+function extractDate(text: string): string {
+  // matches DD/MM/YYYY or DD-MM-YYYY or DDMMYYYY
+  const slash = text.match(/\b(\d{2})[\/\-](\d{2})[\/\-](\d{4})\b/);
+  if (slash) return `${slash[1]}/${slash[2]}/${slash[3]}`;
+
+  const compact = text.match(/\b(\d{2})(\d{2})(\d{4})\b/);
+  if (compact) return `${compact[1]}/${compact[2]}/${compact[3]}`;
+
+  return "";
 }
 
-// ─────────────────────────────────────────────
-// SIMPLE SCORE SYSTEM
-// ─────────────────────────────────────────────
-function score(text: string) {
-  let s = 0;
-  if (text.length > 3) s++;
-  if (/[A-Z]/i.test(text)) s++;
-  if (/\d/.test(text)) s++;
-  return s;
-}
-
-// ─────────────────────────────────────────────
-// VALUE EXTRACTION
-// ─────────────────────────────────────────────
-function getValue(lines: string[], keys: string[]) {
-  for (let i = 0; i < lines.length; i++) {
-    if (matches(lines[i]!, keys)) {
-      const colon = lines[i]!.split(":")[1];
-      if (colon?.trim()) return colon.trim();
-
-      if (lines[i + 1]?.trim()) return lines[i + 1]!.trim();
-      if (lines[i + 2]?.trim()) return lines[i + 2]!.trim();
-    }
+function findValueAfterLabel(
+  lines: string[],
+  index: number,
+  label: RegExp
+): string {
+  const line = lines[index];
+  // value on same line after colon
+  const colon = line.match(/:(.+)$/);
+  if (colon) {
+    const val = clean(colon[1]);
+    if (val.length > 0) return val;
+  }
+  // value on next line
+  if (index + 1 < lines.length) {
+    const next = clean(lines[index + 1]);
+    if (next.length > 0 && !label.test(next)) return next;
   }
   return "";
 }
 
-// ─────────────────────────────────────────────
-// ID CLEANER
-// ─────────────────────────────────────────────
-function cleanId(v: string) {
-  return v
-    .replace(/[|\\]/g, "/")
-    .replace(/O/g, "0")
-    .replace(/I/g, "1")
-    .replace(/\s+/g, "")
-    .toUpperCase();
+function extractGender(text: string): string {
+  const m = text.match(/\b(M|F|MALE|FEMALE)\b/i);
+  if (!m) return "";
+  const raw = m[1].toUpperCase();
+  if (raw === "MALE" || raw === "M") return "M";
+  if (raw === "FEMALE" || raw === "F") return "F";
+  return "";
 }
 
-// ─────────────────────────────────────────────
-// DATE EXTRACTION (SIMPLIFIED + STABLE)
-// ─────────────────────────────────────────────
-function extractDates(text: string) {
-  const d = [...text.matchAll(/\d{2}\/\d{2}\/\d{4}/g)].map(m => m[0]);
-
-  return {
-    dob: d[0],
-    issue: d[1],
-    expiry: d[2],
-  };
+function extractLicenceCode(lines: string[]): string {
+  for (const line of lines) {
+    // licence codes are short: B, BE, C, CE, C1, EB, 4, etc.
+    const m = line.match(/\bcode[:\s]+([A-Z0-9]{1,4})\b/i);
+    if (m) return m[1].toUpperCase();
+  }
+  return "";
 }
 
-// ─────────────────────────────────────────────
-// TITLE CASE
-// ─────────────────────────────────────────────
-function title(str: string) {
-  return str.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase());
+function extractIDNumber(lines: string[]): string {
+  for (const line of lines) {
+    // SA ID: 13 digits
+    const m = line.match(/\b(\d{13})\b/);
+    if (m) return m[1];
+    // labelled
+    const labelled = line.match(/id\s*(?:number|no)?[:\s]+([A-Z0-9]{6,15})/i);
+    if (labelled) return clean(labelled[1]);
+  }
+  return "";
 }
 
-// ─────────────────────────────────────────────
-// RESULT TYPE
-// ─────────────────────────────────────────────
-export interface OCRResult {
-  data: Partial<DriverData>;
-  confident: boolean;
-  extracted: string[];
-  missingFields: string[];
+function extractLicenceNumber(lines: string[]): string {
+  for (const line of lines) {
+    const m = line.match(/licence\s*(?:number|no)?[:\s]+([A-Z0-9]{6,15})/i);
+    if (m) return clean(m[1]);
+  }
+  return "";
 }
 
-// ─────────────────────────────────────────────
-// MAIN PARSER
-// ─────────────────────────────────────────────
-export function parseOCRText(raw: string): OCRResult {
-  const cleaned = cleanText(raw);
-  const lines = cleaned.split("\n").map(l => l.trim()).filter(Boolean);
-  const full = lines.join(" ");
+// ─── Main Parser ─────────────────────────────────────────────────────────────
+
+export function parseOCRText(rawText: string): ParseResult {
+  // Nothing to parse — return empty partial, let UI prefill blanks
+  if (!rawText || rawText.trim().length === 0) {
+    return { data: {} };
+  }
+
+  const lines = rawText
+    .split(/\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  const SURNAME_RE   = /surname|last\s*name|van\s*der/i;
+  const FIRSTNAME_RE = /first\s*name|name[s]?|forename|initials/i;
+  const DOB_RE       = /birth|dob|geboort/i;
+  const GENDER_RE    = /gender|sex|geslag/i;
+  const ID_RE        = /id\s*(number|no)?|identity/i;
+  const LICENCE_RE   = /licen[sc]e?\s*(number|no)?|rij|permit/i;
+  const CODE_RE      = /code|voertuig/i;
+  const ISSUE_RE     = /issue|valid\s*from|vanaf|uitreiking/i;
+  const EXPIRY_RE    = /expir|valid\s*to|verval|geldig/i;
 
   const data: Partial<DriverData> = {};
-  const extracted: string[] = [];
 
-  // ── Surname ──
-  const surname = getValue(lines, ["surname", "1 surname"]);
-  if (surname && score(surname) >= 2) {
-    data.surname = title(surname.split(" ")[0]).slice(0, FIELD_LIMITS.surname);
-    extracted.push("surname");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (!data.surname && SURNAME_RE.test(line)) {
+      const val = findValueAfterLabel(lines, i, SURNAME_RE);
+      if (val) data.surname = val;
+    }
+
+    if (!data.firstName && FIRSTNAME_RE.test(line)) {
+      const val = findValueAfterLabel(lines, i, FIRSTNAME_RE);
+      if (val) data.firstName = val;
+    }
+
+    if (!data.dateOfBirth && DOB_RE.test(line)) {
+      const val = findValueAfterLabel(lines, i, DOB_RE);
+      data.dateOfBirth = extractDate(val || line);
+    }
+
+    if (!data.gender && GENDER_RE.test(line)) {
+      const val = findValueAfterLabel(lines, i, GENDER_RE);
+      data.gender = extractGender(val || line);
+    }
+
+    if (!data.idNumber && ID_RE.test(line)) {
+      data.idNumber = extractIDNumber(lines.slice(i, i + 2));
+    }
+
+    if (!data.licenceNumber && LICENCE_RE.test(line)) {
+      data.licenceNumber = extractLicenceNumber(lines.slice(i, i + 2));
+    }
+
+    if (!data.licenceCode && CODE_RE.test(line)) {
+      data.licenceCode = extractLicenceCode(lines.slice(i, i + 2));
+    }
+
+    if (!data.issueDate && ISSUE_RE.test(line)) {
+      const val = findValueAfterLabel(lines, i, ISSUE_RE);
+      data.issueDate = extractDate(val || line);
+    }
+
+    if (!data.expiryDate && EXPIRY_RE.test(line)) {
+      const val = findValueAfterLabel(lines, i, EXPIRY_RE);
+      data.expiryDate = extractDate(val || line);
+    }
   }
 
-  // ── First Name ──
-  const name = getValue(lines, ["name", "first name", "2 name"]);
-  if (name && score(name) >= 2) {
-    data.firstName = title(name).slice(0, FIELD_LIMITS.firstName);
-    extracted.push("firstName");
+  // Fallback: if no ID found yet, scan all lines for a 13-digit number
+  if (!data.idNumber) {
+    data.idNumber = extractIDNumber(lines);
   }
 
-  // ── DOB + Gender ──
-  const dob = getValue(lines, ["birth", "dob", "date of birth"]);
-  const dm = dob.match(/\d{2}\/\d{2}\/\d{4}/);
-  if (dm) {
-    data.dateOfBirth = dm[0];
-    extracted.push("dateOfBirth");
+  // Fallback: scan all dates if DOB still empty
+  if (!data.dateOfBirth) {
+    for (const line of lines) {
+      const d = extractDate(line);
+      if (d) { data.dateOfBirth = d; break; }
+    }
   }
 
-  const gm = dob.match(/\b(M|F)\b/i);
-  if (gm) {
-    data.gender = gm[1].toUpperCase() as "M" | "F";
-    extracted.push("gender");
-  }
-
-  // ── ID Number ──
-  const id = cleanId(getValue(lines, ["id", "id number", "4d"]));
-  const idm = id.match(/\d{2}\/\d{6,9}[A-Z]\d{2}/);
-  if (idm) {
-    data.idNumber = idm[0].slice(0, FIELD_LIMITS.idNumber);
-    extracted.push("idNumber");
-  }
-
-  // ── Licence Number ──
-  const lic = getValue(lines, ["licence", "license", "5"]);
-  const lm = lic.match(/[A-Z]{1,3}\d{5,10}/i);
-  if (lm) {
-    data.licenceNumber = lm[0].toUpperCase().slice(0, FIELD_LIMITS.licenceNumber);
-    extracted.push("licenceNumber");
-  }
-
-  // ── Code ──
-  const code = getValue(lines, ["code", "class", "9"]);
-  const cm =
-    code.match(/(A1?|B1?E?|BE|C1?E?|CE|D1?E?|DE)/i) ||
-    code.match(/([A-D]\d?E?)/i);
-
-  if (cm?.[1]) {
-    data.licenceCode = cm[1].toUpperCase().slice(0, FIELD_LIMITS.licenceCode);
-    extracted.push("licenceCode");
-  }
-
-  // ── Dates fallback ──
-  const { dob: d1, issue, expiry } = extractDates(full);
-
-  if (!data.dateOfBirth && d1) {
-    data.dateOfBirth = d1;
-    extracted.push("dateOfBirth");
-  }
-
-  if (issue) {
-    data.issueDate = issue;
-    extracted.push("issueDate");
-  }
-
-  if (expiry) {
-    data.expiryDate = expiry;
-    extracted.push("expiryDate");
-  }
-
-  // ── Missing fields ──
-  const required = [
-    "surname",
-    "firstName",
-    "dateOfBirth",
-    "idNumber",
-    "licenceNumber",
-    "licenceCode",
-  ];
-
-  const missingFields = required.filter(k => !data[k as keyof DriverData]);
-
-  // ── Confidence ──
-  const confident =
-    extracted.length >= 4 &&
-    !!data.idNumber &&
-    !!data.surname &&
-    !!data.licenceNumber;
-
-  return {
-    data,
-    confident,
-    extracted,
-    missingFields,
-  };
-}
-
-// ─────────────────────────────────────────────
-// ML KIT BRIDGE
-// ─────────────────────────────────────────────
-export async function parseDriverLicence(photoUri: string): Promise<OCRResult> {
-  const result = await TextRecognition.recognize(photoUri);
-  return parseOCRText(result.text);
+  // Always return whatever was found — never throw, never reject
+  return { data };
 }
