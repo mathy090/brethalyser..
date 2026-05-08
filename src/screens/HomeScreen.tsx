@@ -1,13 +1,12 @@
 /**
  * src/screens/HomeScreen.tsx
+<<<<<<< HEAD
+=======
+ * Simple manual entry – Name & ID only, plus BAC reading.
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
  */
 
-import React, {
-  useState,
-  useCallback,
-  useRef,
-  useEffect,
-} from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
   View,
   Text,
@@ -27,12 +26,16 @@ import { BACKEND_URL } from "@env";
 import { useOfficer } from "../context/OfficerContext";
 import { useNetworkStatus } from "../helpers/network";
 import { useLiveClock } from "../hooks/useLiveClock";
+<<<<<<< HEAD
 import { type DriverData, FIELD_LIMITS } from "../helpers/constants";
+=======
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
 import { useBreathalyser } from "../context/BreathalyserContext";
 import { calculateFine } from "../helpers/fineCalculator";
 import { getToken } from "../security/secureStorage";
 
 // ── Upload error messages ──────────────────────────────
+<<<<<<< HEAD
 
 const UploadErrors = {
   missingDriver: () =>
@@ -43,6 +46,13 @@ const UploadErrors = {
     "The licence photo is still loading. Wait a moment and try again.",
   noPhoto: () =>
     "Attach a photo of the driver licence before uploading.",
+=======
+const UploadErrors = {
+  missingFields: () =>
+    "Please enter both driver name and ID number before uploading.",
+  missingBac: () =>
+    "A breathalyser reading is required before uploading a record.",
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
   invalidBackendUrl: () =>
     "Server address is not configured. Contact your administrator.",
   noNetwork: () =>
@@ -57,6 +67,7 @@ const UploadErrors = {
     detail ? `Unexpected error: ${detail}` : "An unexpected error occurred.",
 } as const;
 
+<<<<<<< HEAD
 // ── Read photo into Blob (Android content:// safe) ───
 
 function readFileAsBlob(uri: string): Promise<Blob> {
@@ -80,12 +91,15 @@ function readFileAsBlob(uri: string): Promise<Blob> {
 
 // ── Component ──────────────────────────────────────────
 
+=======
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
 export default function HomeScreen() {
   const { officer } = useOfficer();
   const { isConnected } = useNetworkStatus();
   const { date, time } = useLiveClock();
   const { result: bacResult } = useBreathalyser();
 
+<<<<<<< HEAD
   // ── Driver fields state ──────────────────────────────
   const [surname, setSurname] = useState("");
   const [firstName, setFirstName] = useState("");
@@ -101,6 +115,11 @@ export default function HomeScreen() {
   const [photoUri, setPhotoUri] = useState<string | null>(null);
   const [isBlobLoading, setIsBlobLoading] = useState(false);
   const photoBlobRef = useRef<Blob | "error" | null>(null);
+=======
+  // Simple fields – name and ID only
+  const [driverName, setDriverName] = useState("");
+  const [idNumber, setIdNumber] = useState("");
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
 
   const [isUploading, setIsUploading] = useState(false);
   const uploadAbortRef = useRef<AbortController | null>(null);
@@ -109,6 +128,7 @@ export default function HomeScreen() {
     return () => { uploadAbortRef.current?.abort(); };
   }, []);
 
+<<<<<<< HEAD
   // ── Pre-cache photo blob after pick ────────────────
   const precachePhotoBlob = useCallback((uri: string) => {
     photoBlobRef.current = null;
@@ -195,12 +215,23 @@ export default function HomeScreen() {
   const handleUpload = useCallback(async () => {
     if (!driverValid) {
       Alert.alert("Incomplete Details", UploadErrors.missingDriver());
+=======
+  // ── Upload readiness ───────────────────────────────
+  const fieldsValid = driverName.trim() !== "" && idNumber.trim() !== "";
+  const uploadReady = fieldsValid && !!bacResult && isConnected;
+
+  // ── Upload logic ───────────────────────────────────
+  const handleUpload = useCallback(async () => {
+    if (!fieldsValid) {
+      Alert.alert("Missing Fields", UploadErrors.missingFields());
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
       return;
     }
     if (!bacResult) {
       Alert.alert("BAC Reading Required", UploadErrors.missingBac());
       return;
     }
+<<<<<<< HEAD
     if (!photoUri) {
       Alert.alert("Photo Missing", UploadErrors.noPhoto());
       return;
@@ -213,6 +244,8 @@ export default function HomeScreen() {
       Alert.alert("Photo Unavailable", "Rescan the licence to retry.");
       return;
     }
+=======
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
 
     const cleanBaseUrl = BACKEND_URL?.trim();
     if (!cleanBaseUrl || !cleanBaseUrl.startsWith("http")) {
@@ -235,6 +268,7 @@ export default function HomeScreen() {
       const bacValue = parseFloat(bacResult.bacPercent.replace("%", ""));
       const fineInfo = calculateFine(bacValue);
 
+<<<<<<< HEAD
       const driverData = buildDriverData();
 
       const formData = new FormData();
@@ -242,10 +276,19 @@ export default function HomeScreen() {
       formData.append("bacData", JSON.stringify({
         bac:       bacValue.toFixed(3),
         timestamp: bacResult.timestamp,
+=======
+      // Build the simple payload
+      const payload = {
+        name: driverName.trim(),
+        idNumber: idNumber.trim(),
+        bac: bacValue.toFixed(3),
+        fine: fineInfo?.amount ?? 0,
+        category: fineInfo?.description ?? "N/A",
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
         overLimit: bacResult.overLimit,
-        fine:      fineInfo?.amount ?? 0,
-        category:  fineInfo?.description ?? "N/A",
+        timestamp: bacResult.timestamp,
         officerId: officer?.officerId ?? "UNKNOWN",
+<<<<<<< HEAD
       }));
       formData.append(
         "photo",
@@ -261,6 +304,19 @@ export default function HomeScreen() {
       const response = await fetch(`${cleanBaseUrl}/api/upload`, {
         method: "POST",
         body:   formData,
+=======
+      };
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+
+      const response = await fetch(`${cleanBaseUrl}/api/record`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
         signal: uploadAbortRef.current.signal,
         headers,
       });
@@ -279,6 +335,7 @@ export default function HomeScreen() {
       }
 
       Alert.alert(
+<<<<<<< HEAD
         "Record Uploaded ✓",
         [
           `Officer:  ${officer?.officerId ?? "—"}`,
@@ -287,6 +344,10 @@ export default function HomeScreen() {
           `BAC:      ${bacResult.bacPercent}`,
           `Fine:     $${fineInfo?.amount ?? 0}`,
         ].join("\n")
+=======
+        "Record Saved ✓",
+        `Name: ${payload.name}\nID: ${payload.idNumber}\nBAC: ${bacResult.bacPercent}\nFine: $${payload.fine}`
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
       );
     } catch (err: any) {
       clearTimeout(timeoutHandle);
@@ -312,6 +373,7 @@ export default function HomeScreen() {
       setIsUploading(false);
       uploadAbortRef.current = null;
     }
+<<<<<<< HEAD
   }, [
     driverValid,
     bacResult,
@@ -321,12 +383,20 @@ export default function HomeScreen() {
     officer,
     buildDriverData,
   ]);
+=======
+  }, [fieldsValid, bacResult, isConnected, officer, driverName, idNumber]);
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
 
   // ── Derived ──────────────────────────────────────────
   const fineInfo = bacResult
     ? calculateFine(parseFloat(bacResult.bacPercent.replace("%", "")))
     : null;
 
+<<<<<<< HEAD
+=======
+  const uploadButtonDisabled = !uploadReady || isUploading;
+
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
   // ── Render ───────────────────────────────────────────
   return (
     <SafeAreaView style={s.root} edges={["top"]}>
@@ -374,6 +444,7 @@ export default function HomeScreen() {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
+<<<<<<< HEAD
         {/* ── Manual Driver Licence Form ── */}
         <View style={s.formCard}>
           <Text style={s.formTitle}>Driver Licence Details</Text>
@@ -419,11 +490,27 @@ export default function HomeScreen() {
             placeholderTextColor="#555"
           />
 
+=======
+        {/* ── Simple Entry Card ── */}
+        <View style={s.formCard}>
+          <Text style={s.formTitle}>Driver Details</Text>
+
+          <Text style={s.label}>Full Name</Text>
+          <TextInput
+            style={s.input}
+            value={driverName}
+            onChangeText={setDriverName}
+            placeholder="e.g. John Doe"
+            placeholderTextColor="#555"
+          />
+
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
           <Text style={s.label}>ID Number</Text>
           <TextInput
             style={s.input}
             value={idNumber}
             onChangeText={setIdNumber}
+<<<<<<< HEAD
             maxLength={FIELD_LIMITS.idNumber}
             placeholder="e.g. 63-1234567A12"
             placeholderTextColor="#555"
@@ -497,6 +584,13 @@ export default function HomeScreen() {
           )}
         </View>
 
+=======
+            placeholder="e.g. 63-1234567A12"
+            placeholderTextColor="#555"
+          />
+        </View>
+
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
         {/* BAC result */}
         {bacResult && (
           <View style={s.bacSection}>
@@ -518,7 +612,7 @@ export default function HomeScreen() {
               </Text>
               <Text style={s.bacTime}>
                 {new Date(bacResult.timestamp).toLocaleTimeString("en-GB", {
-                  hour:   "2-digit",
+                  hour: "2-digit",
                   minute: "2-digit",
                 })}
               </Text>
@@ -550,7 +644,11 @@ export default function HomeScreen() {
           </View>
         )}
 
+<<<<<<< HEAD
         {/* Upload button – enabled without BAC, alert shown if missing */}
+=======
+        {/* Upload button */}
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
         <TouchableOpacity
           style={[s.uploadBtn, uploadButtonDisabled && s.uploadBtnOff]}
           onPress={handleUpload}
@@ -564,6 +662,7 @@ export default function HomeScreen() {
                 Uploading…
               </Text>
             </View>
+<<<<<<< HEAD
           ) : isBlobLoading ? (
             <View style={s.uploadRow}>
               <ActivityIndicator color="#555" size="small" />
@@ -571,6 +670,8 @@ export default function HomeScreen() {
                 Preparing…
               </Text>
             </View>
+=======
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
           ) : (
             <Text
               style={[
@@ -578,12 +679,17 @@ export default function HomeScreen() {
                 { color: uploadButtonDisabled ? "#333" : "#1DB954" },
               ]}
             >
+<<<<<<< HEAD
               Upload Record
+=======
+              Save Record
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
             </Text>
           )}
         </TouchableOpacity>
 
         {/* Hints */}
+<<<<<<< HEAD
         {!driverValid && (
           <Text style={s.hint}>
             Complete all driver details and attach a licence photo
@@ -596,6 +702,13 @@ export default function HomeScreen() {
           <Text style={s.hint}>
             Capture a BAC reading – required to complete upload
           </Text>
+=======
+        {!fieldsValid && (
+          <Text style={s.hint}>Enter driver name and ID number</Text>
+        )}
+        {fieldsValid && !bacResult && (
+          <Text style={s.hint}>Capture a BAC reading to enable upload</Text>
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
         )}
 
         <Text style={s.legalNote}>
@@ -691,8 +804,11 @@ const s = StyleSheet.create({
     padding: 12,
     paddingBottom: 40,
   },
+<<<<<<< HEAD
 
   // Form card
+=======
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
   formCard: {
     backgroundColor: "#1a1a1a",
     borderRadius: 16,
@@ -700,6 +816,7 @@ const s = StyleSheet.create({
     marginBottom: 12,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.05)",
+<<<<<<< HEAD
   },
   formTitle: {
     color: "#fff",
@@ -776,6 +893,35 @@ const s = StyleSheet.create({
   },
 
   // BAC section
+=======
+  },
+  formTitle: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "700",
+    marginBottom: 12,
+  },
+  label: {
+    color: "#888",
+    fontSize: 10,
+    fontWeight: "600",
+    marginTop: 10,
+    marginBottom: 4,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  input: {
+    backgroundColor: "#111",
+    color: "#fff",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    fontSize: 14,
+    fontWeight: "500",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+  },
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
   bacSection: {
     marginTop: 4,
     marginBottom: 8,
@@ -843,8 +989,11 @@ const s = StyleSheet.create({
     marginLeft: 22,
     fontStyle: "italic",
   },
+<<<<<<< HEAD
 
   // upload
+=======
+>>>>>>> c23527767964e22a3a71d349ba3d7c773e4e535e
   uploadBtn: {
     paddingVertical: 16,
     borderRadius: 14,
