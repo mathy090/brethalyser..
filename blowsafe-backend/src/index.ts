@@ -26,180 +26,173 @@ import recordsRoutes from "./routes/records";
 const app = express();
 const httpServer = createServer(app);
 
-// ─── 🔐 Render Proxy Trust (CRITICAL for correct IP detection) ───────────────
-// Render sits behind a proxy; this ensures rate limiting + VPN blocking see real client IPs
-app.set('trust proxy', 1);
+// ─── Proxy Trust ─────────────────────────────
+app.set("trust proxy", 1);
 
-// ─── Middleware ──────────────────────────────────────────────────────────────
-app.use(helmet());
+// ─── Security Middleware ─────────────────────
+app.disable("x-powered-by");
+
+app.use(
+  helmet({
+    crossOriginResourcePolicy: false,
+  })
+);
+
 app.use(compression());
-app.use(cors({ 
-  origin: env.CORS_ORIGIN || "*", 
-  methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}));
+
+app.use(
+  cors({
+    origin: env.NODE_ENV === "production" ? env.CORS_ORIGIN : "*",
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ─── 🔐 Commercial VPN Blocker (Runs on EVERY request) ───────────────────────
+// ─── VPN Blocker ─────────────────────────────
 app.use(blockCommercialVPN);
 
-// ─── Rate Limiting for Public Routes ────────────────────────────────────────
+// ─── Rate Limiting ───────────────────────────
 const publicLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // Limit each IP to 5 registration attempts per window
-  message: { success: false, error: "Too many attempts. Please try again later." },
+  windowMs: 15 * 60 * 1000,
+  max: 20, // FIXED (was 5 → too strict)
   standardHeaders: true,
   legacyHeaders: false,
-  // Use X-Forwarded-For header (now safe because trust proxy is enabled)
-  keyGenerator: (req) => {
-    return req.ip || req.socket.remoteAddress || 'unknown';
-  }
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => req.ip || req.socket.remoteAddress || "unknown",
 });
 
-// ─── Routes ──────────────────────────────────────────────────────────────────
-// PUBLIC ROUTES (no auth required)
+// ─── Routes ──────────────────────────────────
 app.use("/api/auth/register", publicLimiter, registerRoutes);
-
-// PROTECTED ROUTES (require JWT verification via verifyJWT middleware)
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api", uploadRoutes);
 app.use("/api", recordsRoutes);
 
-// ─── Health Checks ──────────────────────────────────────────────────────────
+// ─── Health ──────────────────────────────────
 app.get("/", (_req, res) => {
-  res.json({ 
-    status: "ok", 
-    app: "BlowSafe", 
+  res.json({
+    status: "ok",
+    app: "BlowSafe",
     version: "1.0.0",
-    timestamp: new Date().toISOString()
   });
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ 
-    status: "ok", 
+  res.json({
+    status: "ok",
     uptime: process.uptime(),
-    timestamp: new Date().toISOString()
   });
 });
 
-// ─── 404 Handler ─────────────────────────────────────────────────────────────
-app.use((_req, res) => {
-  // Only respond if headers haven't been sent yet
-  if (!res.headersSent) {
-    res.status(404).json({
-      message: "Endpoint not found",
-      code: "NOT_FOUND",
-      path: _req.path
-    });
-  }
+// ─── 404 ─────────────────────────────────────
+app.use((req, res) => {
+  return res.status(404).json({
+    success: false,
+    code: "NOT_FOUND",
+    message: "Endpoint not found",
+    path: req.path,
+  });
 });
 
-// ─── Global Error Handler ────────────────────────────────────────────────────
-app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  // ⚠️ Critical: Don't override responses that routes already sent
-  if (res.headersSent) {
-    console.error("❌ Error after response sent:", err);
-    return _next(err);
-  }
+// ─── GLOBAL ERROR HANDLER (FIXED) ───────────
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) return next(err);
 
-  // Log the error for backend monitoring
-  console.error("❌ Unhandled error:", {
-    message: err.message,
-    code: err.code,
-    path: _req.path,
-    method: _req.method,
-    ip: _req.ip,
-    timestamp: new Date().toISOString()
-  });
+  console.error("❌ Error:", err);
 
-  const isProduction = env.NODE_ENV === "production";
-
-  // Handle Mongoose validation errors
-  if (err.name === 'ValidationError') {
-    return res.status(400).json({ 
-      success: false,
-      message: "Validation Error", 
-      errors: Object.values(err.errors).map((e: any) => e.message)
-    });
-  }
-
-  // Handle Mongoose duplicate key errors (unique index violations)
+  // ─── MONGO DUPLICATE KEY ───────────────
   if (err.code === 11000) {
-    const field = Object.keys(err.keyPattern || {})[0] || "field";
+    const field = Object.keys(err.keyPattern || {})[0];
+
     return res.status(409).json({
       success: false,
-      error: `${field.charAt(0).toUpperCase() + field.slice(1)} already registered`,
-      code: "DUPLICATE_ENTRY",
-      field
+      code: field === "officerId" ? "OFFICER_ID_EXISTS" : "DUPLICATE_ENTRY",
+      field,
+      message:
+        field === "officerId"
+          ? "Account already in use. Please use your correct officer ID."
+          : "Duplicate entry detected.",
     });
   }
 
-  // Handle Firebase Admin errors that slipped through
+  // ─── FIREBASE ERRORS ────────────────────
   if (err.code?.startsWith("auth/")) {
-    const errorMap: Record<string, { status: number; message: string }> = {
-      "auth/email-already-exists": { status: 409, message: "Email already registered" },
-      "auth/invalid-email": { status: 400, message: "Invalid email address" },
-      "auth/weak-password": { status: 400, message: "Password is too weak" },
-      "auth/user-not-found": { status: 404, message: "User not found" },
-    };
-    const mapped = errorMap[err.code];
-    if (mapped) {
-      return res.status(mapped.status).json({
+    if (err.code === "auth/email-already-exists") {
+      return res.status(409).json({
         success: false,
-        error: mapped.message,
-        code: err.code.toUpperCase()
+        code: "EMAIL_EXISTS",
+        field: "email",
+        message: "Email already registered.",
+      });
+    }
+
+    if (err.code === "auth/invalid-email") {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_EMAIL",
+        field: "email",
+        message: "Invalid email address.",
+      });
+    }
+
+    if (err.code === "auth/weak-password") {
+      return res.status(400).json({
+        success: false,
+        code: "WEAK_PASSWORD",
+        field: "password",
+        message: "Password is too weak.",
       });
     }
   }
 
-  // Default: Internal server error (hide details in production)
-  res.status(500).json({
+  // ─── VALIDATION ERRORS ───────────────────
+  if (err.name === "ValidationError") {
+    return res.status(400).json({
+      success: false,
+      code: "VALIDATION_ERROR",
+      message: "Validation failed",
+      errors: Object.values(err.errors).map((e: any) => e.message),
+    });
+  }
+
+  // ─── DEFAULT ─────────────────────────────
+  return res.status(500).json({
     success: false,
-    message: isProduction ? "Internal server error" : err.message,
     code: "INTERNAL_ERROR",
-    ...( !isProduction && { stack: err.stack }),
+    message:
+      env.NODE_ENV === "production"
+        ? "Internal server error"
+        : err.message,
   });
 });
 
-// ─── Server Startup ──────────────────────────────────────────────────────────
+// ─── SERVER START ───────────────────────────
 async function startServer() {
   try {
-    console.log("🔄 Connecting to MongoDB...");
     await connectMongo();
-    console.log("✅ MongoDB connected successfully");
-
-    console.log("🔄 Initializing Firebase Admin SDK...");
     await initFirebaseAdmin();
-    console.log("✅ Firebase Admin initialized");
-
     initSocket(httpServer);
-    console.log("✅ Socket.IO initialized");
 
     httpServer.listen(env.PORT, "0.0.0.0", () => {
-      console.log(`🚀 [BlowSafe] Server running on port ${env.PORT}`);
-      console.log(`📡 Environment: ${env.NODE_ENV}`);
-      console.log(`🔗 API Base: ${process.env.API_BASE_URL || `http://localhost:${env.PORT}`}`);
+      console.log(`🚀 BlowSafe running on port ${env.PORT}`);
     });
-  } catch (error) {
-    console.error("❌ Failed to start server:", error);
+  } catch (err) {
+    console.error("❌ Startup failed:", err);
     process.exit(1);
   }
 }
 
-// ─── Process Handlers ────────────────────────────────────────────────────────
-process.on("unhandledRejection", (reason, promise) => {
-  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
-});
 process.on("uncaughtException", (err) => {
   console.error("❌ Uncaught Exception:", err);
   process.exit(1);
 });
-process.on("SIGTERM", () => {
-  console.log("🔄 SIGTERM received. Shutting down gracefully...");
-  httpServer.close(() => { console.log("✅ Server closed."); process.exit(0); });
+
+process.on("unhandledRejection", (reason) => {
+  console.error("❌ Unhandled Rejection:", reason);
 });
 
 startServer();
