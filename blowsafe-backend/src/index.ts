@@ -8,16 +8,20 @@ import { createServer } from "http";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
+import rateLimit from "express-rate-limit";
 
 import { env } from "./config/env";
 import { connectMongo } from "./config/mongo";
+import { initFirebaseAdmin } from "./config/firebase";
 import { initSocket } from "./config/socket";
+import { blockCommercialVPN } from "./middleware/vpnBlocker";
 
 // Routes
+import registerRoutes from "./routes/register";
 import authRoutes from "./routes/auth";
 import adminRoutes from "./routes/admin";
-import uploadRoutes from "./routes/upload";      // POST /api/upload (public)
-import recordsRoutes from "./routes/records";    // GET  /api/records (public)
+import uploadRoutes from "./routes/upload";
+import recordsRoutes from "./routes/records";
 
 const app = express();
 const httpServer = createServer(app);
@@ -26,20 +30,39 @@ const httpServer = createServer(app);
 app.use(helmet());
 app.use(compression());
 app.use(cors({ 
-  origin: "*", 
+  origin: env.CORS_ORIGIN || "*", 
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
+// ─── 🔐 Commercial VPN/Proxy Blocker (Runs on EVERY request) ─────────────────
+app.use(blockCommercialVPN);
+
+// ─── Rate Limiting for Public Routes ────────────────────────────────────────
+const publicLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // Limit each IP to 5 requests per window
+  message: { 
+    success: false, 
+    error: "Too many attempts. Please try again later." 
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // ─── Routes ──────────────────────────────────────────────────────────────────
+// PUBLIC ROUTES
+app.use("/api/auth/register", publicLimiter, registerRoutes);
+
+// PROTECTED & INTERNAL ROUTES
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
-app.use("/api", uploadRoutes);     // POST /api/upload
-app.use("/api", recordsRoutes);    // GET  /api/records
+app.use("/api", uploadRoutes);
+app.use("/api", recordsRoutes);
 
-// ─── Health Checks ───────────────────────────────────────────────────────────
+// ─── Health Checks ──────────────────────────────────────────────────────────
 app.get("/", (_req, res) => {
   res.json({ 
     status: "ok", 
@@ -89,13 +112,17 @@ async function startServer() {
     await connectMongo();
     console.log("✅ MongoDB connected successfully");
 
+    console.log("🔄 Initializing Firebase Admin SDK...");
+    await initFirebaseAdmin();
+    console.log("✅ Firebase Admin initialized");
+
     initSocket(httpServer);
     console.log("✅ Socket.IO initialized");
 
     httpServer.listen(env.PORT, "0.0.0.0", () => {
       console.log(`🚀 [BlowSafe] Server running on port ${env.PORT}`);
       console.log(`📡 Environment: ${env.NODE_ENV}`);
-      console.log(`🔗 API Base: ${process.env.API_BASE_URL || `http://localhost:${env.PORT}`}`);
+      console.log(` API Base: ${process.env.API_BASE_URL || `http://localhost:${env.PORT}`}`);
     });
   } catch (error) {
     console.error("❌ Failed to start server:", error);

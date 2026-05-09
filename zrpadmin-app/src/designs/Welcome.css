@@ -1,0 +1,190 @@
+/* ===== Root Container: flex: 1 → full viewport ===== */
+.welcome-root {
+    position: relative;
+    min-height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+}
+
+/* ===== Background Image: ImageBackground + blurRadius={10} ===== */
+.welcome-bg {
+    position: absolute;
+    inset: 0;
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    filter: blur(10px);
+    /* Exact match for blurRadius={10} */
+    transform: scale(1.05);
+    /* Prevent blur edges from showing */
+    z-index: 0;
+}
+
+/* ===== Overlay: backgroundColor: "rgba(0,0,0,0.78)" ===== */
+.welcome-overlay {
+    position: relative;
+    z-index: 1;
+    min-height: 100vh;
+    width: 100%;
+    background-color: rgba(0, 0, 0, 0.78);
+    /* Exact match */
+
+    /* Layout: justifyContent: "space-evenly", paddingHorizontal: 30, paddingVertical: 80 */
+    display: flex;
+    flex-direction: column;
+    justify-content: space-evenly;
+    padding: 80px 30px;
+    box-sizing: border-box;
+}
+
+/* ===== Title: fontSize: 36, fontWeight: "bold", color: "#1DB954", textAlign: "center" ===== */
+.welcome-title {
+    font-size: 36px;
+    font-weight: bold;
+    color: #1DB954;
+    text-align: center;
+    margin: 0;
+    opacity: 0;
+    /* Hidden until animation */
+}
+
+/* ===== Subtitle: color: "#b3b3b3", fontSize: 16, textAlign: "center", lineHeight: 24 ===== */
+.welcome-subtitle {
+    color: #b3b3b3;
+    font-size: 16px;
+    text-align: center;
+    line-height: 24px;
+    margin: 0;
+    opacity: 0;
+}
+
+/* ===== Buttons Container: gap: 14 ===== */
+.welcome-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    /* Exact match */
+    align-items: center;
+    opacity: 0;
+}
+
+/* ===== Button: borderColor: "#1DB954", borderWidth: 1.5, borderRadius: 30, paddingVertical: 14 ===== */
+.welcome-btn {
+    width: 100%;
+    max-width: 280px;
+    padding: 14px 0;
+    /* paddingVertical: 14 */
+    border: 1.5px solid #1DB954;
+    /* borderWidth: 1.5 */
+    border-radius: 30px;
+    /* borderRadius: 30 */
+    background: transparent;
+    color: #1DB954;
+    font-size: 16px;
+    font-weight: 600;
+    text-align: center;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.2s;
+    box-sizing: border-box;
+}
+
+.welcome-btn:hover {
+    background: rgba(29, 185, 84, 0.1);
+    transform: translateY(-2px);
+}
+
+.welcome-btn:active {
+    transform: translateY(0);
+}
+
+/* ===== Animations: Match Animatable durations/delays ===== */
+
+/* fadeInDown: duration={900} */
+@keyframes fadeInDown {
+    from {
+        opacity: 0;
+        transform: translateY(-30px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* fadeIn: base animation */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+/* fadeInUp: base animation */
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(30px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Apply animations with exact delays */
+.animate-fade-in-down {
+    animation: fadeInDown 900ms ease-out forwards;
+}
+
+.animate-fade-in {
+    animation: fadeIn 900ms ease-out 300ms forwards;
+    /* delay={300} */
+}
+
+.animate-fade-in-up {
+    animation: fadeInUp 900ms ease-out 500ms forwards;
+    /* delay={500} */
+}
+
+/* ===== Responsive: Maintain layout on small screens ===== */
+@media (max-width: 480px) {
+    .welcome-overlay {
+        padding: 60px 20px;
+    }
+
+    .welcome-title {
+        font-size: 32px;
+    }
+
+    .welcome-subtitle {
+        font-size: 15px;
+    }
+
+    .welcome-btn {
+        max-width: 100%;
+    }
+}
+
+/* ===== Reduced Motion Preference ===== */
+@media (prefers-reduced-motion: reduce) {
+
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-delay: 0ms !important;
+        transition: none !important;
+    }
+
+    .welcome-title,
+    .welcome-subtitle,
+    .welcome-buttons {
+        opacity: 1 !important;
+    }
+}
