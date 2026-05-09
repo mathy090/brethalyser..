@@ -10,7 +10,10 @@ const router = Router();
 // VALIDATION
 // ============================================
 const validateRegistration = (body: any) => {
-  const { officerId, email, password } = body;
+  const { officerId, email } = body;
+
+  // ONLY validate officer ID + email
+  // NO PASSWORD VALIDATION
 
   if (
     !officerId ||
@@ -32,19 +35,6 @@ const validateRegistration = (body: any) => {
     };
   }
 
-  if (
-    !password ||
-    password.length < 8 ||
-    !/[A-Z]/.test(password) ||
-    !/[!@#$%^&*]/.test(password)
-  ) {
-    return {
-      code: "WEAK_PASSWORD",
-      message:
-        "Password must contain 8+ chars, uppercase & special character",
-    };
-  }
-
   return null;
 };
 
@@ -55,8 +45,11 @@ router.post("/", async (req: Request, res: Response) => {
   try {
     const { officerId, email, password } = req.body;
 
-    const normalizedOfficerId = officerId?.toUpperCase().trim();
-    const normalizedEmail = email?.toLowerCase().trim();
+    const normalizedOfficerId =
+      officerId?.toUpperCase().trim();
+
+    const normalizedEmail =
+      email?.toLowerCase().trim();
 
     console.log("\n=======================================");
     console.log("🚔 NEW REGISTRATION ATTEMPT");
@@ -68,10 +61,14 @@ router.post("/", async (req: Request, res: Response) => {
     // ============================================
     // 1. VALIDATION
     // ============================================
-    const validationError = validateRegistration(req.body);
+    const validationError =
+      validateRegistration(req.body);
 
     if (validationError) {
-      console.log("❌ Validation failed:", validationError.code);
+      console.log(
+        "❌ Validation failed:",
+        validationError.code
+      );
 
       return res.status(400).json({
         success: false,
@@ -89,9 +86,10 @@ router.post("/", async (req: Request, res: Response) => {
       officerId: normalizedOfficerId,
     });
 
-    // Officer ID already used
+    // OFFICER ID EXISTS
     if (existingOfficer) {
-      // Different email trying same ID
+
+      // DIFFERENT EMAIL USING SAME ID
       if (
         existingOfficer.email.toLowerCase() !==
         normalizedEmail
@@ -100,9 +98,11 @@ router.post("/", async (req: Request, res: Response) => {
         console.log(
           `Officer ID ${normalizedOfficerId} already belongs to another email`
         );
+
         console.log(
           `Existing Email: ${existingOfficer.email}`
         );
+
         console.log(
           `Attempted Email: ${normalizedEmail}`
         );
@@ -115,8 +115,8 @@ router.post("/", async (req: Request, res: Response) => {
         });
       }
 
-      // Same email + same ID
-      console.log("🚫 SAME ACCOUNT EXISTS");
+      // SAME EMAIL + SAME ID
+      console.log("🚫 ACCOUNT ALREADY EXISTS");
 
       return res.status(409).json({
         success: false,
@@ -143,9 +143,10 @@ router.post("/", async (req: Request, res: Response) => {
       });
 
       console.log("✅ Firebase user created");
-      console.log("Firebase UID:", firebaseUser.uid);
+      console.log("UID:", firebaseUser.uid);
 
     } catch (firebaseError: any) {
+
       console.log("❌ Firebase create failed");
       console.log(firebaseError);
 
@@ -173,6 +174,7 @@ router.post("/", async (req: Request, res: Response) => {
     console.log("🗄️ Creating MongoDB officer...");
 
     try {
+
       await Officer.create({
         officerId: normalizedOfficerId,
         email: normalizedEmail,
@@ -186,6 +188,7 @@ router.post("/", async (req: Request, res: Response) => {
       console.log("Status: pending");
 
     } catch (mongoError: any) {
+
       console.log("❌ MongoDB create failed");
       console.log(mongoError);
 
@@ -195,15 +198,19 @@ router.post("/", async (req: Request, res: Response) => {
       console.log("🧹 Rolling back Firebase user...");
 
       try {
+
         await adminAuth.deleteUser(firebaseUser.uid);
 
         console.log(
           "✅ Firebase rollback successful"
         );
+
       } catch (rollbackError) {
+
         console.log(
           "❌ Firebase rollback failed"
         );
+
         console.log(rollbackError);
       }
 
@@ -221,18 +228,24 @@ router.post("/", async (req: Request, res: Response) => {
     console.log("📧 Generating verification link...");
 
     try {
+
       const verificationLink =
         await adminAuth.generateEmailVerificationLink(
           normalizedEmail
         );
 
-      console.log("✅ Verification link generated");
+      console.log(
+        "✅ Verification link generated"
+      );
+
       console.log(verificationLink);
 
     } catch (emailError) {
+
       console.log(
         "⚠️ Verification link generation failed"
       );
+
       console.log(emailError);
     }
 
@@ -253,6 +266,7 @@ router.post("/", async (req: Request, res: Response) => {
     });
 
   } catch (err: any) {
+
     console.log("❌ REGISTER ROUTE CRASHED");
     console.log(err);
 
