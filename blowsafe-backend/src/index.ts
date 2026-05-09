@@ -14,10 +14,10 @@ import { env } from "./config/env";
 import { connectMongo } from "./config/mongo";
 import { initFirebaseAdmin } from "./config/firebase";
 import { initSocket } from "./config/socket";
-import { blockCommercialVPN } from "./middleware/vpnBlocker";
+import { blockCommercialVPN } from "./middleware/vpnBlocker"; // ← Your VPN blocker
 
 // Routes
-import registerRoutes from "./routes/register";
+import registerRoutes from "./routes/register"; // ← NEW: Public signup
 import authRoutes from "./routes/auth";
 import adminRoutes from "./routes/admin";
 import uploadRoutes from "./routes/upload";
@@ -37,26 +37,23 @@ app.use(cors({
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ─── 🔐 Commercial VPN/Proxy Blocker (Runs on EVERY request) ─────────────────
+// ─── 🔐 Commercial VPN Blocker (Runs on EVERY request) ───────────────────────
 app.use(blockCommercialVPN);
 
 // ─── Rate Limiting for Public Routes ────────────────────────────────────────
 const publicLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // Limit each IP to 5 requests per window
-  message: { 
-    success: false, 
-    error: "Too many attempts. Please try again later." 
-  },
+  max: 5, // Limit each IP to 5 registration attempts per window
+  message: { success: false, error: "Too many attempts. Please try again later." },
   standardHeaders: true,
   legacyHeaders: false,
 });
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
-// PUBLIC ROUTES
-app.use("/api/auth/register", publicLimiter, registerRoutes);
+// PUBLIC ROUTES (no auth required)
+app.use("/api/auth/register", publicLimiter, registerRoutes); // ← NEW: Mounted FIRST
 
-// PROTECTED & INTERNAL ROUTES
+// PROTECTED ROUTES (require JWT verification via verifyJWT middleware)
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api", uploadRoutes);
@@ -122,7 +119,7 @@ async function startServer() {
     httpServer.listen(env.PORT, "0.0.0.0", () => {
       console.log(`🚀 [BlowSafe] Server running on port ${env.PORT}`);
       console.log(`📡 Environment: ${env.NODE_ENV}`);
-      console.log(` API Base: ${process.env.API_BASE_URL || `http://localhost:${env.PORT}`}`);
+      console.log(`🔗 API Base: ${process.env.API_BASE_URL || `http://localhost:${env.PORT}`}`);
     });
   } catch (error) {
     console.error("❌ Failed to start server:", error);
