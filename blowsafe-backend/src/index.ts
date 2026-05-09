@@ -26,6 +26,10 @@ import recordsRoutes from "./routes/records";
 const app = express();
 const httpServer = createServer(app);
 
+// ─── 🔐 Render Proxy Trust (CRITICAL for correct IP detection) ───────────────
+// Render sits behind a proxy; this ensures rate limiting + VPN blocking see real client IPs
+app.set('trust proxy', 1);
+
 // ─── Middleware ──────────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(compression());
@@ -47,6 +51,10 @@ const publicLimiter = rateLimit({
   message: { success: false, error: "Too many attempts. Please try again later." },
   standardHeaders: true,
   legacyHeaders: false,
+  // Use X-Forwarded-For header (now safe because trust proxy is enabled)
+  keyGenerator: (req) => {
+    return req.ip || req.socket.remoteAddress || 'unknown';
+  }
 });
 
 // ─── Routes ──────────────────────────────────────────────────────────────────

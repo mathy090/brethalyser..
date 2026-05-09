@@ -1,18 +1,16 @@
-/* ===== Container: flex: 1, backgroundColor: "#121212" ===== */
+/* ===== Container ===== */
 .signup-container {
     min-height: 100vh;
     background-color: #121212;
-    /* Exact match */
     padding: 24px;
     padding-top: 60px;
     display: flex;
     flex-direction: column;
     align-items: center;
     overflow-y: auto;
-    /* ScrollView equivalent */
 }
 
-/* ===== Title: fontSize: 26, fontWeight: "bold", color: "#1DB954" ===== */
+/* ===== Title ===== */
 .signup-title {
     font-size: 26px;
     font-weight: bold;
@@ -31,35 +29,34 @@
 
 .form-group {
     margin-bottom: 4px;
-    /* Match RN marginBottom on input + error spacing */
 }
 
-/* ===== Inputs: backgroundColor: "#1e1e1e", borderRadius: 8, padding: 14 ===== */
+/* ===== Inputs ===== */
 .input {
     width: 100%;
     background-color: #1e1e1e;
-    /* Exact match */
     color: #fff;
     border-radius: 8px;
     padding: 14px;
     font-size: 15px;
     border: 1px solid transparent;
-    transition: border-color 0.2s;
+    transition: border-color 0.2s, box-shadow 0.2s;
     box-sizing: border-box;
 }
 
 .input::placeholder {
     color: #666;
-    /* placeholderTextColor match */
 }
 
 .input:focus {
     outline: none;
     border-color: #1DB954;
+    box-shadow: 0 0 0 3px rgba(29, 185, 84, 0.2);
 }
 
 .input-error {
     border-color: #FF4C4C;
+    box-shadow: 0 0 0 3px rgba(255, 76, 76, 0.2);
 }
 
 .input:disabled {
@@ -67,23 +64,37 @@
     cursor: not-allowed;
 }
 
-/* ===== Error Text: color: "#FF4C4C", fontSize: 12 ===== */
+/* ===== Error Text ===== */
 .error-text {
     color: #FF4C4C;
-    /* Exact match */
     font-size: 12px;
     margin: 4px 0 10px 4px;
+    animation: shake 0.3s ease-in-out;
 }
 
-/* ===== Submit Button: backgroundColor: "#1DB954", borderRadius: 25 ===== */
+@keyframes shake {
+
+    0%,
+    100% {
+        transform: translateX(0);
+    }
+
+    25% {
+        transform: translateX(-4px);
+    }
+
+    75% {
+        transform: translateX(4px);
+    }
+}
+
+/* ===== Submit Button ===== */
 .btn {
     width: 100%;
     background-color: #1DB954;
-    /* Exact match */
     color: #fff;
     padding: 15px;
     border-radius: 25px;
-    /* Exact match */
     border: none;
     font-size: 17px;
     font-weight: bold;
@@ -92,22 +103,23 @@
     align-items: center;
     justify-content: center;
     gap: 8px;
-    transition: opacity 0.2s;
+    transition: opacity 0.2s, transform 0.2s, box-shadow 0.2s;
     margin-top: 24px;
-    /* Exact match */
 }
 
 .btn:hover:not(:disabled) {
     opacity: 0.95;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 20px rgba(29, 185, 84, 0.4);
 }
 
 .btn:disabled {
     opacity: 0.6;
-    /* btnDisabled match */
     cursor: not-allowed;
+    transform: none;
 }
 
-/* ===== Loading Spinner (CSS-only, matches ActivityIndicator) ===== */
+/* ===== Loading Spinner ===== */
 .spinner {
     width: 20px;
     height: 20px;
@@ -123,17 +135,100 @@
     }
 }
 
-/* ===== Disclaimer: color: "#666", fontSize: 11, lineHeight: 17 ===== */
+/* ===== Disclaimer ===== */
 .disclaimer {
     color: #666;
-    /* Exact match */
     font-size: 11px;
     text-align: center;
     margin-top: 20px;
     line-height: 17px;
-    /* Exact match */
     max-width: 400px;
     padding: 0 8px;
+}
+
+/* ===== Banner System ===== */
+.banner {
+    width: 100%;
+    max-width: 480px;
+    padding: 16px 40px 16px 20px;
+    border-radius: 10px;
+    margin-bottom: 20px;
+    position: relative;
+    animation: slideDown 0.3s ease-out;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.banner-success {
+    background: linear-gradient(135deg, #1DB954, #1ed760);
+    color: #000;
+    border-left: 4px solid #000;
+}
+
+.banner-error {
+    background: linear-gradient(135deg, #FF4C4C, #ff6b6b);
+    color: #fff;
+    border-left: 4px solid #fff;
+}
+
+.banner-warning {
+    background: linear-gradient(135deg, #FFA500, #ffb347);
+    color: #000;
+    border-left: 4px solid #000;
+}
+
+.banner-text {
+    font-size: 14px;
+    line-height: 1.6;
+    margin: 0 0 12px 0;
+    white-space: pre-line;
+}
+
+.banner-btn {
+    background: rgba(0, 0, 0, 0.2);
+    color: inherit;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+    margin-right: 8px;
+}
+
+.banner-btn:hover {
+    background: rgba(0, 0, 0, 0.3);
+}
+
+.banner-close {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    background: none;
+    border: none;
+    color: inherit;
+    font-size: 20px;
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.2s, transform 0.2s;
+    line-height: 1;
+    padding: 4px;
+}
+
+.banner-close:hover {
+    opacity: 1;
+    transform: scale(1.1);
 }
 
 /* ===== Responsive ===== */
@@ -145,11 +240,34 @@
 
     .signup-title {
         font-size: 24px;
+        margin-bottom: 24px;
+    }
+
+    .input,
+    .btn {
+        font-size: 14px;
+        padding: 12px;
+    }
+
+    .banner {
+        padding: 14px 36px 14px 16px;
+    }
+
+    .banner-text {
+        font-size: 13px;
     }
 }
 
-/* ===== Reduced Motion Preference ===== */
+/* ===== Reduced Motion ===== */
 @media (prefers-reduced-motion: reduce) {
+
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+    }
+
     .spinner {
         animation: none;
         border-top-color: transparent;

@@ -1,120 +1,259 @@
 // blowsafe-backend/src/middleware/vpnBlocker.ts
+
 import { Request, Response, NextFunction } from 'express';
-import ipaddr from 'ipaddr.js';
 import axios from 'axios';
+import CIDRMatcher from 'cidr-matcher';
 import { env } from '../config/env';
 
-// Free, open-source commercial VPN IPv4 CIDR list (updated weekly by community)
-const VPN_LIST_URL = 'https://raw.githubusercontent.com/X4BNet/lists_vpn/main/vpn/ipv4.txt';
+// VPN + Datacenter intelligence feeds
+const VPN_LIST_URLS = [
+  'https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt',
+  'https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/datacenter/ipv4.txt',
+  'https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level2.netset',
+];
 
-interface CIDRNetwork {
-  ip: ipaddr.IPv4;
-  mask: number;
-}
+// Minimal emergency fallback
+const BUILTIN_VPN_RANGES = [
+  '185.220.100.0/22',
+  '104.244.76.0/24',
+  '185.220.102.0/24',
+];
 
-let vpnNetworks: CIDRNetwork[] = [];
+let matcher = new CIDRMatcher([]);
+let loadedRanges = 0;
+
 let isLoading = false;
+let lastLoadAttempt = 0;
+
+const LOAD_COOLDOWN = 5 * 60 * 1000; // 5 mins
 const REFRESH_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
- * Fetch & parse free commercial VPN IP ranges into memory
+ * Extract CIDRs from text response
  */
-const fetchVPNList = async () => {
-  if (isLoading) return;
-  isLoading = true;
-  
-  try {
-    console.log('🔄 Loading free commercial VPN IP ranges...');
-    const { data } = await axios.get(VPN_LIST_URL, { timeout: 5000 });
-    const lines = data.split('\n');
-    const networks: CIDRNetwork[] = [];
-    
-    for (const line of lines) {
-      const cidr = line.trim();
-      if (cidr && !cidr.startsWith('#') && cidr.includes('/')) {
-        try {
-          const [ip, mask] = ipaddr.parseCIDR(cidr);
-          networks.push({ ip: ip as ipaddr.IPv4, mask });
-        } catch {
-          // Skip malformed lines
-        }
-      }
+const extractCIDRs = (data: string): string[] => {
+  const cidrs: string[] = [];
+
+  const lines = data.split('\n');
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (
+      !trimmed ||
+      trimmed.startsWith('#') ||
+      trimmed.startsWith('!') ||
+      trimmed.startsWith(';')
+    ) {
+      continue;
     }
-    
-    vpnNetworks = networks;
-    console.log(`✅ VPN Blocker: Loaded ${vpnNetworks.length} commercial VPN ranges`);
+
+    const match = trimmed.match(
+      /(\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2})/
+    );
+
+    if (match?.[1]) {
+      cidrs.push(match[1]);
+    }
+  }
+
+  return cidrs;
+};
+
+/**
+ * Fetch VPN lists from all providers
+ */
+const fetchVPNRanges = async (): Promise<string[]> => {
+  const allRanges = new Set<string>();
+
+  for (const url of VPN_LIST_URLS) {
+    try {
+      console.log(`🔄 Fetching VPN feed: ${url}`);
+
+      const { data } = await axios.get(url, {
+        timeout: 10000,
+        headers: {
+          'User-Agent': 'BlowSafe-VPN-Blocker/2.0',
+        },
+      });
+
+      const cidrs = extractCIDRs(data);
+
+      cidrs.forEach(cidr => allRanges.add(cidr));
+
+      console.log(`✅ Loaded ${cidrs.length} ranges from ${url}`);
+    } catch (err) {
+      console.warn(
+        `⚠️ Failed loading ${url}:`,
+        err instanceof Error ? err.message : 'Unknown error'
+      );
+    }
+  }
+
+  // Fallback if all feeds failed
+  if (allRanges.size === 0) {
+    console.warn(
+      `⚠️ All feeds failed. Using built-in fallback ranges.`
+    );
+
+    BUILTIN_VPN_RANGES.forEach(cidr => allRanges.add(cidr));
+  }
+
+  return Array.from(allRanges);
+};
+
+/**
+ * Load CIDR matcher into memory
+ */
+const loadVPNMatcher = async () => {
+  if (isLoading) return;
+
+  const now = Date.now();
+
+  // Prevent spam reloads
+  if (now - lastLoadAttempt < LOAD_COOLDOWN) {
+    return;
+  }
+
+  lastLoadAttempt = now;
+  isLoading = true;
+
+  try {
+    const cidrs = await fetchVPNRanges();
+
+    matcher = new CIDRMatcher(cidrs);
+
+    loadedRanges = cidrs.length;
+
+    console.log(
+      `✅ VPN matcher loaded with ${loadedRanges} CIDR ranges`
+    );
   } catch (err) {
-    console.error('⚠️ VPN List fetch failed (fail-open):', err);
+    console.error(
+      '❌ Failed loading VPN matcher:',
+      err
+    );
   } finally {
     isLoading = false;
   }
 };
 
-// Auto-refresh every 24 hours
-setInterval(fetchVPNList, REFRESH_INTERVAL);
-// Initial load on startup
-fetchVPNList();
+// Initial load
+loadVPNMatcher();
+
+// Auto refresh every 24h
+setInterval(loadVPNMatcher, REFRESH_INTERVAL);
 
 /**
- * Check if an IP falls within any commercial VPN range
+ * Extract real client IP
  */
-const isCommercialVPN = (clientIP: string): boolean => {
+const getClientIP = (req: Request): string => {
+  const cfIP = req.headers['cf-connecting-ip'];
+
+  if (cfIP) {
+    return String(cfIP).split(',')[0].trim();
+  }
+
+  const forwarded = req.headers['x-forwarded-for'];
+
+  if (forwarded) {
+    return String(forwarded).split(',')[0].trim();
+  }
+
+  const realIP = req.headers['x-real-ip'];
+
+  if (realIP) {
+    return String(realIP).trim();
+  }
+
+  return req.socket.remoteAddress || 'unknown';
+};
+
+/**
+ * Local/private IP detection
+ */
+const isPrivateIP = (ip: string): boolean => {
+  return (
+    ip === 'unknown' ||
+    ip.startsWith('127.') ||
+    ip.startsWith('10.') ||
+    ip.startsWith('192.168.') ||
+    ip.startsWith('172.16.') ||
+    ip.startsWith('172.17.') ||
+    ip.startsWith('172.18.') ||
+    ip.startsWith('172.19.') ||
+    ip.startsWith('172.20.') ||
+    ip.startsWith('172.21.') ||
+    ip.startsWith('172.22.') ||
+    ip.startsWith('172.23.') ||
+    ip.startsWith('172.24.') ||
+    ip.startsWith('172.25.') ||
+    ip.startsWith('172.26.') ||
+    ip.startsWith('172.27.') ||
+    ip.startsWith('172.28.') ||
+    ip.startsWith('172.29.') ||
+    ip.startsWith('172.30.') ||
+    ip.startsWith('172.31.')
+  );
+};
+
+/**
+ * Fast VPN/datacenter detection
+ */
+const isVPN = (ip: string): boolean => {
   try {
-    const addr = ipaddr.parse(clientIP);
-    if (addr.kind() !== 'ipv4') return false;
-    
-    // Fast CIDR match against all loaded ranges
-    return vpnNetworks.some(network => addr.match(network.ip, network.mask));
+    return matcher.contains(ip);
   } catch {
     return false;
   }
 };
 
 /**
- * Extract real client IP behind proxies/load balancers
+ * Middleware
  */
-const getClientIP = (req: Request): string => {
-  if (req.headers['cf-connecting-ip']) return String(req.headers['cf-connecting-ip']);
-  if (req.headers['x-forwarded-for']) {
-    const ips = String(req.headers['x-forwarded-for']).split(',');
-    return ips[0].trim();
-  }
-  if (req.headers['x-real-ip']) return String(req.headers['x-real-ip']);
-  return req.socket.remoteAddress || 'unknown';
-};
-
-/**
- * Express middleware: Block commercial VPN/Proxy connections
- * Mounted at app level → runs on EVERY request (including /register)
- */
-export const blockCommercialVPN = async (req: Request, res: Response, next: NextFunction) => {
-  // Skip in development to avoid blocking localhost/testing
-  if (env.NODE_ENV === 'development') return next();
-
-  const ip = getClientIP(req);
-  
-  // Skip private/local IPs
-  if (ip === 'unknown' || ip.startsWith('127.') || ip.startsWith('192.168.') || 
-      ip.startsWith('10.') || ip.startsWith('172.16.') || ip.startsWith('172.17.')) {
+export const blockCommercialVPN = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  // Skip in development
+  if (env.NODE_ENV === 'development') {
     return next();
   }
 
-  // Wait up to 3s for initial list load if not ready
-  if (vpnNetworks.length === 0) {
-    if (!isLoading) {
-      console.warn('⚠️ VPN list not loaded yet. Allowing request (fail-open).');
-      return next();
-    }
-    await new Promise(resolve => setTimeout(resolve, 2000));
+  const ip = getClientIP(req);
+
+  // Allow private/local traffic
+  if (isPrivateIP(ip)) {
+    return next();
   }
 
-  // Block if IP matches commercial VPN range
-  if (vpnNetworks.length > 0 && isCommercialVPN(ip)) {
+  // Fail-open if matcher still loading
+  if (loadedRanges === 0) {
+    if (!isLoading) {
+      loadVPNMatcher().catch(() => {});
+    }
+
+    console.warn(
+      '⚠️ VPN matcher not ready. Allowing request (fail-open).'
+    );
+
+    return next();
+  }
+
+  // VPN / Datacenter match
+  if (isVPN(ip)) {
+    console.warn(
+      `🚫 BLOCKED VPN/DATACENTER IP: ${ip} | ${req.method} ${req.path}`
+    );
+
     return res.status(403).json({
       success: false,
-      error: 'Commercial VPN/Proxy connections are not permitted.',
-      message: 'Please disconnect your VPN and try again. If you believe this is an error, contact support.',
-      code: 'COMMERCIAL_VPN_BLOCKED'
+      error:
+        'Commercial VPN or datacenter connections are not permitted.',
+      message:
+        'Please disable your VPN/proxy and try again.',
+      code: 'COMMERCIAL_VPN_BLOCKED',
     });
   }
 
