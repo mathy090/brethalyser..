@@ -58,16 +58,14 @@ export default function Signup() {
     setLoading(true);
 
     const result = await registerOfficer(
-      officerId,
-      email,
+      officerId.toUpperCase().trim(),
+      email.toLowerCase().trim(),
       password
     );
 
     setLoading(false);
 
-    // =========================
-    // SUCCESS
-    // =========================
+    // ================= SUCCESS =================
     if (result.success) {
       setBanner({
         message:
@@ -82,37 +80,45 @@ export default function Signup() {
       return;
     }
 
-    // =========================
-    // ERROR HANDLING (FIXED)
-    // =========================
-    const code = result.code;
-    const message = result.error;
+    // ================= FIXED ERROR NORMALIZATION =================
+    const code = result.code?.toUpperCase();
+    const message = result.error || "";
 
-    switch (code) {
+    // IMPORTANT: normalize backend mismatches
+    const normalizedOfficerError =
+      code === "OFFICER_ID_ALREADY_EXISTS"
+        ? "OFFICER_ID_EXISTS"
+        : code;
+
+    switch (normalizedOfficerError) {
       case "OFFICER_ID_EXISTS":
+        setErrors({
+          officerId: "Officer ID already exists",
+        });
+
         setBanner({
           message:
             "🚫 Account already in use. Please use your correct officer ID.",
           type: "error",
         });
-
-        setErrors({ officerId: message || "Officer ID already exists" });
         break;
 
       case "EMAIL_EXISTS":
-        setBanner({
-          message:
-            "📧 Email already registered. Please sign in.",
-          type: "warning",
+      case "FIREBASE_EMAIL_EXISTS":
+        setErrors({
+          email: "Email already registered",
         });
 
-        setErrors({ email: "Email already registered" });
+        setBanner({
+          message: "📧 Email already registered. Please sign in.",
+          type: "warning",
+        });
         break;
 
       case "WEAK_PASSWORD":
         setErrors({
           password:
-            "Password is too weak (8+ chars, 1 uppercase, 1 special character)",
+            "Password too weak (8+ chars, 1 uppercase, 1 special character)",
         });
         break;
 
@@ -139,16 +145,14 @@ export default function Signup() {
 
       case "INTERNAL_ERROR":
         setBanner({
-          message:
-            "🌐 Server error. Please try again later.",
+          message: "🌐 Server error. Please try again later.",
           type: "error",
         });
         break;
 
       default:
         setBanner({
-          message:
-            message || "❌ Registration failed. Try again.",
+          message: message || "❌ Registration failed. Try again.",
           type: "error",
         });
     }
@@ -190,7 +194,6 @@ export default function Signup() {
 
       <form onSubmit={handleRegister} className="signup-form">
 
-        {/* Officer ID */}
         <div className="form-group">
           <input
             className={`input ${errors.officerId ? "input-error" : ""}`}
@@ -206,7 +209,6 @@ export default function Signup() {
           )}
         </div>
 
-        {/* Email */}
         <div className="form-group">
           <input
             className={`input ${errors.email ? "input-error" : ""}`}
@@ -222,7 +224,6 @@ export default function Signup() {
           )}
         </div>
 
-        {/* Password */}
         <div className="form-group">
           <input
             type="password"
@@ -239,7 +240,6 @@ export default function Signup() {
           )}
         </div>
 
-        {/* Confirm */}
         <div className="form-group">
           <input
             type="password"
@@ -256,7 +256,6 @@ export default function Signup() {
           )}
         </div>
 
-        {/* Button */}
         <button
           type="submit"
           className={`btn ${loading ? "btn-loading" : ""}`}

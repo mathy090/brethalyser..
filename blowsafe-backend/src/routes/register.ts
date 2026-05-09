@@ -1,191 +1,136 @@
-// blowsafe-backend/src/routes/register.ts
 import { Router, Request, Response } from "express";
 import { adminAuth } from "../config/firebase";
 import { Officer } from "../models/Officer";
-import { Errors } from "../utils/errors";
 
 const router = Router();
 
-// Pure validation helper (no external deps)
 const validateRegistration = (body: any) => {
-  const errors: string[] = [];
   const { officerId, email, password } = body;
 
-  if (!officerId || !/^[A-Z]{1}\d{6}[A-Z]{1}$|^\d{9}$/i.test(officerId)) {
-    errors.push("Invalid Officer ID format (e.g., A123456B)");
+  if (!officerId || !/^[A-Z]\d{6}[A-Z]$|^\d{9}$/i.test(officerId)) {
+    return "INVALID_OFFICER_ID";
   }
+
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    errors.push("Invalid email address");
+    return "INVALID_EMAIL";
   }
+
   if (!password || password.length < 8 || !/[A-Z]/.test(password) || !/[!@#$%^&*]/.test(password)) {
-    errors.push("Password must be 8+ chars, 1 uppercase, 1 special character");
+    return "WEAK_PASSWORD";
   }
-  return errors;
+
+  return null;
 };
 
-/**
- * POST /api/auth/register
- * 
- * 🔐 STRICT SECURITY FLOW:
- * 1. Validate input
- * 2. 🔍 Check MongoDB for officerId FIRST (case-insensitive, trimmed) ← BEFORE ANY FIREBASE CALLS
- * 3. If exists → LOG WARNING → RETURN 409 ERROR → STOP (no Firebase, no email)
- * 4. Only if NOT exists → Create Firebase user
- * 5. Create MongoDB officer record (status: pending)
- * 6. Send verification email (non-fatal if fails)
- * 7. Return success response
- */
-router.post("/", async (req: Request, res: Response): Promise<void> => {
+router.post("/", async (req: Request, res: Response) => {
   try {
-    // 1. Validate input
-    const validationErrors = validateRegistration(req.body);
-    if (validationErrors.length > 0) {
-      Errors.invalidField(res, "registration", validationErrors[0]);
-      return;
+    const { officerId, email, password } = req.body;
+
+    const normalizedOfficerId = officerId?.toUpperCase().trim();
+    const normalizedEmail = email?.toLowerCase().trim();
+
+    // =========================
+    // 1. VALIDATION
+    // =========================
+    const validationError = validateRegistration(req.body);
+    if (validationError) {
+      return res.status(400).json({
+        success: false,
+        code: validationError,
+        error: validationError
+      });
     }
 
-    const { officerId, email, password } = req.body;
-    
-    // Normalize inputs for consistent matching
-    const normalizedEmail = email.toLowerCase().trim();
-    const normalizedOfficerId = officerId.toUpperCase().trim();
-
-    // Debug log for troubleshooting
-    console.log(`🔍 Registration attempt: officerId="${normalizedOfficerId}" (original: "${officerId}"), email="${normalizedEmail}", IP: ${req.ip}`);
-
-    // 2. 🔍 CRITICAL: Check MongoDB for officerId FIRST (before ANY Firebase calls)
-    // Case-insensitive match using regex with 'i' flag
+    // =========================
+    // 2. CHECK MONGODB FIRST (CRITICAL)
+    // =========================
     const existingOfficer = await Officer.findOne({
-      officerId: { $regex: new RegExp(`^${normalizedOfficerId}$`, 'i') }
+      officerId: normalizedOfficerId
     });
 
     if (existingOfficer) {
-      // 🚨 SECURITY LOG: Full audit trail for duplicate registration attempts
-      console.warn(`⚠️ REGISTRATION BLOCKED: Officer ID "${normalizedOfficerId}" already exists in MongoDB. 
-        IP: ${req.ip}, 
-        Email attempted: "${normalizedEmail}", 
-        Existing account status: "${existingOfficer.status}", 
-        Existing role: "${existingOfficer.role}",
-        Existing firebaseUid: "${existingOfficer.firebaseUid?.slice(0, 8)}...",
-        Timestamp: ${new Date().toISOString()}`);
-      
-      // ✅ RETURN ERROR IMMEDIATELY — NO FIREBASE, NO EMAIL, NO DB WRITE
       return res.status(409).json({
         success: false,
-        error: "User account already in use, use your actual ID officer",
-        code: "OFFICER_ID_ALREADY_EXISTS",
-        field: "officerId"
+        code: "OFFICER_ID_EXISTS",
+        error: "Officer ID already in use"
       });
     }
 
-    // 3. ✅ Officer ID is unique → Proceed to Firebase Auth
+    // ALSO check email in Mongo
+    const existingEmail = await Officer.findOne({
+      email: normalizedEmail
+    });
+
+    if (existingEmail) {
+      return res.status(409).json({
+        success: false,
+        code: "EMAIL_EXISTS",
+        error: "Email already registered"
+      });
+    }
+
+    // =========================
+    // 3. CREATE FIREBASE USER
+    // =========================
     let firebaseUser;
+
     try {
-      console.log(`✅ Officer ID "${normalizedOfficerId}" is unique. Creating Firebase user for "${normalizedEmail}"...`);
-      
       firebaseUser = await adminAuth.createUser({
         email: normalizedEmail,
         password,
-        emailVerified: false, // User must verify via email link
-        disabled: false,
+        emailVerified: false,
       });
-      
-      console.log(`✅ Firebase user created: uid="${firebaseUser.uid}", emailVerified=${firebaseUser.emailVerified}`);
-    } catch (firebaseError: any) {
-      // Handle Firebase-specific errors
-      console.error("❌ Firebase createUser error:", firebaseError);
-      
-      if (firebaseError.code === "auth/email-already-exists") {
+    } catch (err: any) {
+      if (err.code === "auth/email-already-exists") {
         return res.status(409).json({
           success: false,
-          error: "Email already registered in Firebase. Please sign in.",
-          code: "FIREBASE_EMAIL_EXISTS",
-          field: "email"
+          code: "EMAIL_EXISTS",
+          error: "Email already exists in Firebase"
         });
       }
-      if (firebaseError.code === "auth/invalid-email") {
-        Errors.invalidField(res, "email", "Invalid email address.");
-        return;
-      }
-      if (firebaseError.code === "auth/weak-password") {
-        Errors.invalidField(res, "password", "Password is too weak.");
-        return;
-      }
-      // Re-throw for catch-all handler
-      throw firebaseError;
-    }
 
-    // 4. ✅ Create MongoDB officer record (status: pending)
-    try {
-      console.log(`📝 Creating MongoDB officer record for uid="${firebaseUser.uid}"...`);
-      
-      await Officer.create({
-        firebaseUid: firebaseUser.uid,
-        officerId: normalizedOfficerId,
-        email: normalizedEmail,
-        role: "officer",        // ← Hardcoded: no privilege escalation via client input
-        status: "pending",      // ← DEFAULT: awaits admin approval (24-48 hours)
-        createdAt: new Date(),
-        approvalRequestedAt: new Date(),
+      return res.status(500).json({
+        success: false,
+        code: "FIREBASE_ERROR",
+        error: err.message
       });
-      
-      console.log(`✅ MongoDB officer record created with status="pending"`);
-    } catch (mongoError: any) {
-      console.error("❌ MongoDB create error:", mongoError);
-      
-      // Handle duplicate key errors (unique index violation) as final safety net
-      if (mongoError.code === 11000) {
-        // Clean up Firebase user to avoid orphans
-        try {
-          console.log(`🧹 Cleaning up Firebase user "${firebaseUser.uid}" after MongoDB duplicate...`);
-          await adminAuth.deleteUser(firebaseUser.uid);
-          console.log(`✅ Firebase user cleaned up`);
-        } catch (cleanupError) {
-          console.warn("⚠️ Failed to clean up Firebase user after MongoDB duplicate:", cleanupError);
-        }
-        
-        const field = mongoError.keyPattern?.officerId ? "Officer ID" : "Email";
-        return res.status(409).json({
-          success: false,
-          error: `${field} already registered. Please sign in.`,
-          code: "MONGO_DUPLICATE",
-          field: mongoError.keyPattern?.officerId ? "officerId" : "email"
-        });
-      }
-      throw mongoError;
     }
 
-    // 5. ✅ Trigger Firebase email verification link (non-fatal if fails)
-    try {
-      console.log(`📧 Sending verification email to "${normalizedEmail}"...`);
-      await adminAuth.generateEmailVerificationLink(normalizedEmail);
-      console.log(`✅ Verification email sent (or queued)`);
-    } catch (emailError) {
-      // Non-critical: account still works, user can request resend later
-      console.warn("⚠️ Verification email send failed (non-fatal):", emailError);
-    }
-
-    // 6. ✅ Success response
-    console.log(`🎉 Registration successful for officerId="${normalizedOfficerId}", email="${normalizedEmail}"`);
-    
-    res.status(201).json({
-      success: true,
-      message: "✅ Account created. Check your email (including spam folder) to verify. Your account is pending admin approval (24-48 hours).",
+    // =========================
+    // 4. CREATE MONGODB USER
+    // =========================
+    await Officer.create({
       officerId: normalizedOfficerId,
       email: normalizedEmail,
+      firebaseUid: firebaseUser.uid,
+      role: "officer",
+      status: "pending",
+      createdAt: new Date(),
     });
 
-  } catch (error: any) {
-    // Catch-all for unexpected errors
-    console.error("❌ Registration error (unhandled):", {
-      message: error.message,
-      code: error.code,
-      stack: error.stack,
-      timestamp: new Date().toISOString()
+    // =========================
+    // 5. SEND VERIFICATION LINK
+    // =========================
+    try {
+      const link = await adminAuth.generateEmailVerificationLink(normalizedEmail);
+      console.log("EMAIL LINK:", link);
+    } catch (e) {
+      console.warn("Email link failed:", e);
+    }
+
+    return res.status(201).json({
+      success: true,
+      code: "ACCOUNT_CREATED",
+      message: "Account created successfully"
     });
-    Errors.internal(res, "POST /api/auth/register", error);
+
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      code: "INTERNAL_ERROR",
+      error: err.message
+    });
   }
 });
 
-// ✅ CRITICAL: Default export for Bun/ESM compatibility
 export default router;

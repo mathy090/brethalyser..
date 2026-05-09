@@ -1,6 +1,6 @@
 /**
  * blowsafe-backend/src/index.ts
- * BlowSafe API server entry point
+ * BlowSafe API server entry point (HARDENED VERSION)
  */
 
 import express from "express";
@@ -26,10 +26,10 @@ import recordsRoutes from "./routes/records";
 const app = express();
 const httpServer = createServer(app);
 
-// ─── Proxy Trust ─────────────────────────────
+// ─────────────────────────────────────────────
+// SECURITY CORE
+// ─────────────────────────────────────────────
 app.set("trust proxy", 1);
-
-// ─── Security Middleware ─────────────────────
 app.disable("x-powered-by");
 
 app.use(
@@ -40,6 +40,9 @@ app.use(
 
 app.use(compression());
 
+// ─────────────────────────────────────────────
+// CORS
+// ─────────────────────────────────────────────
 app.use(
   cors({
     origin: env.NODE_ENV === "production" ? env.CORS_ORIGIN : "*",
@@ -49,30 +52,50 @@ app.use(
   })
 );
 
+// ─────────────────────────────────────────────
+// BODY PARSER
+// ─────────────────────────────────────────────
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ─── VPN Blocker ─────────────────────────────
+// ─────────────────────────────────────────────
+// VPN BLOCKER (RUNS FIRST FOR SECURITY)
+// ─────────────────────────────────────────────
 app.use(blockCommercialVPN);
 
-// ─── Rate Limiting ───────────────────────────
+// ─────────────────────────────────────────────
+// RATE LIMIT (registration protection)
+// ─────────────────────────────────────────────
 const publicLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20, // FIXED (was 5 → too strict)
+  max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  skipSuccessfulRequests: true,
-  keyGenerator: (req) => req.ip || req.socket.remoteAddress || "unknown",
+
+  // IMPORTANT: stable IP detection behind proxies
+  keyGenerator: (req) => {
+    return (
+      req.headers["cf-connecting-ip"] ||
+      req.headers["x-forwarded-for"] ||
+      req.ip ||
+      req.socket.remoteAddress ||
+      "unknown"
+    ).toString();
+  },
 });
 
-// ─── Routes ──────────────────────────────────
+// ─────────────────────────────────────────────
+// ROUTES
+// ─────────────────────────────────────────────
 app.use("/api/auth/register", publicLimiter, registerRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api", uploadRoutes);
 app.use("/api", recordsRoutes);
 
-// ─── Health ──────────────────────────────────
+// ─────────────────────────────────────────────
+// HEALTH CHECK
+// ─────────────────────────────────────────────
 app.get("/", (_req, res) => {
   res.json({
     status: "ok",
@@ -88,9 +111,11 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// ─── 404 ─────────────────────────────────────
+// ─────────────────────────────────────────────
+// 404 HANDLER
+// ─────────────────────────────────────────────
 app.use((req, res) => {
-  return res.status(404).json({
+  res.status(404).json({
     success: false,
     code: "NOT_FOUND",
     message: "Endpoint not found",
@@ -98,68 +123,74 @@ app.use((req, res) => {
   });
 });
 
-// ─── GLOBAL ERROR HANDLER (FIXED) ───────────
+// ─────────────────────────────────────────────
+// GLOBAL ERROR HANDLER (FIXED + UNIFIED)
+// ─────────────────────────────────────────────
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (res.headersSent) return next(err);
 
-  console.error("❌ Error:", err);
+  console.error("❌ Backend Error:", {
+    message: err.message,
+    code: err.code,
+    path: req.path,
+  });
 
-  // ─── MONGO DUPLICATE KEY ───────────────
+  // ─── MONGO DUPLICATES ─────────────────────
   if (err.code === 11000) {
     const field = Object.keys(err.keyPattern || {})[0];
 
     return res.status(409).json({
       success: false,
-      code: field === "officerId" ? "OFFICER_ID_EXISTS" : "DUPLICATE_ENTRY",
+      code: field === "officerId" ? "OFFICER_ID_EXISTS" : "EMAIL_EXISTS",
       field,
       message:
         field === "officerId"
-          ? "Account already in use. Please use your correct officer ID."
-          : "Duplicate entry detected.",
+          ? "Officer ID already in use"
+          : "Email already registered",
     });
   }
 
-  // ─── FIREBASE ERRORS ────────────────────
+  // ─── FIREBASE ERRORS ──────────────────────
   if (err.code?.startsWith("auth/")) {
-    if (err.code === "auth/email-already-exists") {
-      return res.status(409).json({
-        success: false,
+    const map: Record<string, any> = {
+      "auth/email-already-exists": {
         code: "EMAIL_EXISTS",
         field: "email",
-        message: "Email already registered.",
-      });
-    }
-
-    if (err.code === "auth/invalid-email") {
-      return res.status(400).json({
-        success: false,
+        status: 409,
+      },
+      "auth/invalid-email": {
         code: "INVALID_EMAIL",
         field: "email",
-        message: "Invalid email address.",
-      });
-    }
-
-    if (err.code === "auth/weak-password") {
-      return res.status(400).json({
-        success: false,
+        status: 400,
+      },
+      "auth/weak-password": {
         code: "WEAK_PASSWORD",
         field: "password",
-        message: "Password is too weak.",
+        status: 400,
+      },
+    };
+
+    const mapped = map[err.code];
+    if (mapped) {
+      return res.status(mapped.status).json({
+        success: false,
+        code: mapped.code,
+        field: mapped.field,
+        message: err.message,
       });
     }
   }
 
-  // ─── VALIDATION ERRORS ───────────────────
+  // ─── VALIDATION ───────────────────────────
   if (err.name === "ValidationError") {
     return res.status(400).json({
       success: false,
       code: "VALIDATION_ERROR",
-      message: "Validation failed",
       errors: Object.values(err.errors).map((e: any) => e.message),
     });
   }
 
-  // ─── DEFAULT ─────────────────────────────
+  // ─── FALLBACK ─────────────────────────────
   return res.status(500).json({
     success: false,
     code: "INTERNAL_ERROR",
@@ -170,7 +201,9 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   });
 });
 
-// ─── SERVER START ───────────────────────────
+// ─────────────────────────────────────────────
+// START SERVER
+// ─────────────────────────────────────────────
 async function startServer() {
   try {
     await connectMongo();
