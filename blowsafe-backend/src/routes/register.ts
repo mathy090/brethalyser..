@@ -25,7 +25,14 @@ const validateRegistration = (body: any) => {
 
 /**
  * POST /api/auth/register
- * Checks officerId FIRST → logs warning if exists → returns instant error
+ * 
+ * STRICT ORDER:
+ * 1. Validate input
+ * 2. 🔍 Check MongoDB for officerId (CASE-INSENSITIVE) ← BEFORE ANY FIREBASE CALLS
+ * 3. If exists → LOG WARNING → RETURN ERROR → STOP (no Firebase, no email)
+ * 4. Only if NOT exists → Create Firebase user
+ * 5. Create MongoDB record (status: pending)
+ * 6. Send verification email
  */
 router.post("/", async (req: Request, res: Response): Promise<void> => {
   try {
@@ -40,16 +47,21 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
     const normalizedEmail = email.toLowerCase().trim();
     const normalizedOfficerId = officerId.toUpperCase().trim();
 
-    // 2. 🔍 CHECK OFFICER ID FIRST (before ANY Firebase/DB writes)
-    const existingOfficer = await Officer.findOne({ 
-      officerId: { $regex: new RegExp(`^${normalizedOfficerId}$`, 'i') } 
+    // 2. 🔍 CRITICAL: Check MongoDB for officerId FIRST (before ANY Firebase calls)
+    // Case-insensitive, trimmed match
+    const existingOfficer = await Officer.findOne({
+      officerId: { $regex: new RegExp(`^${normalizedOfficerId}$`, 'i') }
     });
 
     if (existingOfficer) {
-      // 🚨 LOG TO BACKEND: Security audit trail
-      console.warn(`⚠️ REGISTRATION BLOCKED: Officer ID "${normalizedOfficerId}" already in use. IP: ${req.ip}, Email attempted: "${normalizedEmail}", Timestamp: ${new Date().toISOString()}`);
+      // 🚨 SECURITY LOG: Attempted duplicate registration
+      console.warn(`⚠️ REGISTRATION BLOCKED: Officer ID "${normalizedOfficerId}" already exists in MongoDB. 
+        IP: ${req.ip}, 
+        Email attempted: "${normalizedEmail}", 
+        Existing account status: "${existingOfficer.status}", 
+        Timestamp: ${new Date().toISOString()}`);
       
-      // Return specific error for frontend
+      // ✅ RETURN ERROR IMMEDIATELY — NO FIREBASE, NO EMAIL
       return res.status(409).json({
         success: false,
         error: "User account already in use, use your actual ID officer",
@@ -58,25 +70,7 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
       });
     }
 
-    // 3. Check email uniqueness (secondary check)
-    const existingEmail = await Officer.findOne({ email: normalizedEmail });
-    if (existingEmail) {
-      console.warn(`⚠️ REGISTRATION BLOCKED: Email "${normalizedEmail}" already registered. IP: ${req.ip}, Officer ID attempted: "${normalizedOfficerId}", Timestamp: ${new Date().toISOString()}`);
-      
-      const statusMsg = existingEmail.status === "approved" || existingEmail.status === "active"
-        ? "Email already registered and approved. Please sign in."
-        : `Email already registered. Status: ${existingEmail.status.toUpperCase()}`;
-      
-      return res.status(409).json({
-        success: false,
-        error: statusMsg,
-        code: "EMAIL_ALREADY_EXISTS",
-        field: "email",
-        status: existingEmail.status
-      });
-    }
-
-    // 4. ✅ All clear → Create Firebase Auth user
+    // 3. ✅ Officer ID is unique → Proceed to Firebase
     let firebaseUser;
     try {
       firebaseUser = await adminAuth.createUser({
@@ -86,6 +80,7 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
         disabled: false,
       });
     } catch (firebaseError: any) {
+      // Handle Firebase-specific errors
       if (firebaseError.code === "auth/email-already-exists") {
         return res.status(409).json({
           success: false,
@@ -104,21 +99,26 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
       throw firebaseError;
     }
 
-    // 5. ✅ Create MongoDB officer record (status: pending)
+    // 4. ✅ Create MongoDB officer record (status: pending)
     try {
       await Officer.create({
         firebaseUid: firebaseUser.uid,
         officerId: normalizedOfficerId,
         email: normalizedEmail,
-        role: "officer",
-        status: "pending",
+        role: "officer",        // ← Hardcoded: no privilege escalation
+        status: "pending",      // ← DEFAULT: awaits admin approval
         createdAt: new Date(),
         approvalRequestedAt: new Date(),
       });
     } catch (mongoError: any) {
+      // Handle duplicate key errors (unique index violation) as final safety net
       if (mongoError.code === 11000) {
-        // Cleanup Firebase user to avoid orphans
-        try { await adminAuth.deleteUser(firebaseUser.uid); } catch (e) { console.warn("⚠️ Firebase cleanup failed:", e); }
+        // Clean up Firebase user to avoid orphans
+        try {
+          await adminAuth.deleteUser(firebaseUser.uid);
+        } catch (cleanupError) {
+          console.warn("⚠️ Failed to clean up Firebase user after MongoDB duplicate:", cleanupError);
+        }
         
         const field = mongoError.keyPattern?.officerId ? "Officer ID" : "Email";
         return res.status(409).json({
@@ -131,14 +131,15 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
       throw mongoError;
     }
 
-    // 6. ✅ Trigger verification email (non-fatal if fails)
+    // 5. ✅ Trigger Firebase email verification link (non-fatal if fails)
     try {
       await adminAuth.generateEmailVerificationLink(normalizedEmail);
-    } catch (e) {
-      console.warn("⚠️ Verification email send failed:", e);
+    } catch (emailError) {
+      // Non-critical: account still works, user can request resend later
+      console.warn("⚠️ Verification email send failed (non-fatal):", emailError);
     }
 
-    // 7. ✅ Success response
+    // 6. ✅ Success response
     res.status(201).json({
       success: true,
       message: "✅ Account created. Check your email (including spam folder) to verify. Your account is pending admin approval (24-48 hours).",
@@ -147,9 +148,11 @@ router.post("/", async (req: Request, res: Response): Promise<void> => {
     });
 
   } catch (error: any) {
+    // Catch-all for unexpected errors
     console.error("❌ Registration error:", error);
     Errors.internal(res, "POST /api/auth/register", error);
   }
 });
 
+// ✅ CRITICAL: Default export for Bun/ESM compatibility
 export default router;
