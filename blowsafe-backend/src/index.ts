@@ -14,10 +14,10 @@ import { env } from "./config/env";
 import { connectMongo } from "./config/mongo";
 import { initFirebaseAdmin } from "./config/firebase";
 import { initSocket } from "./config/socket";
-import { blockCommercialVPN } from "./middleware/vpnBlocker"; // ← Your VPN blocker
+import { blockCommercialVPN } from "./middleware/vpnBlocker";
 
 // Routes
-import registerRoutes from "./routes/register"; // ← NEW: Public signup
+import registerRoutes from "./routes/register";
 import authRoutes from "./routes/auth";
 import adminRoutes from "./routes/admin";
 import uploadRoutes from "./routes/upload";
@@ -51,7 +51,7 @@ const publicLimiter = rateLimit({
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
 // PUBLIC ROUTES (no auth required)
-app.use("/api/auth/register", publicLimiter, registerRoutes); // ← NEW: Mounted FIRST
+app.use("/api/auth/register", publicLimiter, registerRoutes);
 
 // PROTECTED ROUTES (require JWT verification via verifyJWT middleware)
 app.use("/api/auth", authRoutes);
@@ -79,23 +79,77 @@ app.get("/health", (_req, res) => {
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
 app.use((_req, res) => {
-  res.status(404).json({
-    message: "Endpoint not found",
-    code: "NOT_FOUND",
-    path: _req.path
-  });
+  // Only respond if headers haven't been sent yet
+  if (!res.headersSent) {
+    res.status(404).json({
+      message: "Endpoint not found",
+      code: "NOT_FOUND",
+      path: _req.path
+    });
+  }
 });
 
 // ─── Global Error Handler ────────────────────────────────────────────────────
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error("❌ Unhandled error:", err);
-  const isProduction = env.NODE_ENV === "production";
-
-  if (err.name === 'ValidationError') {
-    return res.status(400).json({ message: "Validation Error", errors: err.errors });
+  // ⚠️ Critical: Don't override responses that routes already sent
+  if (res.headersSent) {
+    console.error("❌ Error after response sent:", err);
+    return _next(err);
   }
 
+  // Log the error for backend monitoring
+  console.error("❌ Unhandled error:", {
+    message: err.message,
+    code: err.code,
+    path: _req.path,
+    method: _req.method,
+    ip: _req.ip,
+    timestamp: new Date().toISOString()
+  });
+
+  const isProduction = env.NODE_ENV === "production";
+
+  // Handle Mongoose validation errors
+  if (err.name === 'ValidationError') {
+    return res.status(400).json({ 
+      success: false,
+      message: "Validation Error", 
+      errors: Object.values(err.errors).map((e: any) => e.message)
+    });
+  }
+
+  // Handle Mongoose duplicate key errors (unique index violations)
+  if (err.code === 11000) {
+    const field = Object.keys(err.keyPattern || {})[0] || "field";
+    return res.status(409).json({
+      success: false,
+      error: `${field.charAt(0).toUpperCase() + field.slice(1)} already registered`,
+      code: "DUPLICATE_ENTRY",
+      field
+    });
+  }
+
+  // Handle Firebase Admin errors that slipped through
+  if (err.code?.startsWith("auth/")) {
+    const errorMap: Record<string, { status: number; message: string }> = {
+      "auth/email-already-exists": { status: 409, message: "Email already registered" },
+      "auth/invalid-email": { status: 400, message: "Invalid email address" },
+      "auth/weak-password": { status: 400, message: "Password is too weak" },
+      "auth/user-not-found": { status: 404, message: "User not found" },
+    };
+    const mapped = errorMap[err.code];
+    if (mapped) {
+      return res.status(mapped.status).json({
+        success: false,
+        error: mapped.message,
+        code: err.code.toUpperCase()
+      });
+    }
+  }
+
+  // Default: Internal server error (hide details in production)
   res.status(500).json({
+    success: false,
     message: isProduction ? "Internal server error" : err.message,
     code: "INTERNAL_ERROR",
     ...( !isProduction && { stack: err.stack }),
