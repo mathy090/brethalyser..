@@ -1,11 +1,10 @@
 /**
  * src/utils/mailer.ts
- * Resend-based email sender (API KEY only)
+ * Gmail API sender (OAuth2 refresh token)
  */
 
-import { Resend } from "resend";
-
-// ─── Error type ───────────────────────────────────────────────
+import { google } from "googleapis";
+import { MailerError } from "./mailerError"; // (same class if already inside file, otherwise keep inline)
 
 export class MailerError extends Error {
   constructor(
@@ -18,27 +17,36 @@ export class MailerError extends Error {
   }
 }
 
-// ─── Init Resend ───────────────────────────────────────────────
+// ─── Validate env ───────────────────────────────────────────────
 
-if (!process.env.RESEND_API_KEY) {
+const required = [
+  "GOOGLE_CLIENT_ID",
+  "GOOGLE_CLIENT_SECRET",
+  "GOOGLE_REFRESH_TOKEN",
+  "GMAIL_USER",
+] as const;
+
+const missing = required.filter((k) => !process.env[k]);
+
+if (missing.length > 0) {
   throw new MailerError(
     "MAILER_CONFIG_MISSING",
-    "Missing RESEND_API_KEY"
+    `Missing env vars: ${missing.join(", ")}`
   );
 }
 
-if (!process.env.EMAIL_FROM) {
-  throw new MailerError(
-    "MAILER_CONFIG_MISSING",
-    "Missing EMAIL_FROM"
-  );
-}
+// ─── OAuth Client ───────────────────────────────────────────────
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const oAuth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID!,
+  process.env.GOOGLE_CLIENT_SECRET!
+);
 
-console.log("📡 [Resend] Initialized");
+oAuth2Client.setCredentials({
+  refresh_token: process.env.GOOGLE_REFRESH_TOKEN!,
+});
 
-// ─── Send Function ───────────────────────────────────────────────
+// ─── Send Mail ───────────────────────────────────────────────
 
 interface MailOptions {
   to: string;
@@ -47,36 +55,44 @@ interface MailOptions {
   html?: string;
 }
 
-export async function sendMail(opts: MailOptions): Promise<void> {
-  const from = process.env.EMAIL_FROM!;
+function encodeMessage(message: string) {
+  return Buffer.from(message)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
 
-  console.log("\n📨 [Resend] Sending email...");
+export async function sendMail(opts: MailOptions): Promise<void> {
+  console.log("\n📨 [GMAIL] Sending email...");
   console.log("➡️ To:", opts.to);
 
   try {
-    const { data, error } = await resend.emails.send({
-      from,
-      to: opts.to,
-      subject: opts.subject,
-      text: opts.text,
-      html: opts.html,
+    const accessToken = await oAuth2Client.getAccessToken();
+
+    const rawMessage = [
+      `From: BlowSafe <${process.env.GMAIL_USER}>`,
+      `To: ${opts.to}`,
+      `Subject: ${opts.subject}`,
+      `Content-Type: text/html; charset="UTF-8"`,
+      "",
+      opts.html || opts.text,
+    ].join("\n");
+
+    const encodedMessage = encodeMessage(rawMessage);
+
+    const gmail = google.gmail({ version: "v1", auth: oAuth2Client });
+
+    await gmail.users.messages.send({
+      userId: "me",
+      requestBody: {
+        raw: encodedMessage,
+      },
     });
 
-    if (error) {
-      console.error("❌ [Resend] Error:", error);
-
-      throw new MailerError(
-        "MAILER_SEND_FAILED",
-        "Failed to send email",
-        error
-      );
-    }
-
-    console.log("✅ [Resend] Email sent successfully");
-    console.log("📧 ID:", data?.id);
-
+    console.log("✅ [GMAIL] Email sent successfully");
   } catch (err) {
-    console.error("❌ [Resend] Exception:", err);
+    console.error("❌ [GMAIL] Send failed:", err);
 
     throw new MailerError(
       "MAILER_SEND_FAILED",

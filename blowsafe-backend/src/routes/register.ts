@@ -60,9 +60,7 @@ router.post("/", async (req, res) => {
   }
 
   // 2. Check Officer ID
-  const exists = await Officer.findOne({
-    officerId: normId,
-  });
+  const exists = await Officer.findOne({ officerId: normId });
 
   if (exists) {
     return res.status(409).json({
@@ -83,7 +81,6 @@ router.post("/", async (req, res) => {
     });
 
   } catch (e: any) {
-
     if (e.code !== "auth/user-not-found") {
       return res.status(500).json({
         success: false,
@@ -104,7 +101,7 @@ router.post("/", async (req, res) => {
     .auth()
     .generateEmailVerificationLink(normEmail);
 
-  // 6. SEND EMAIL via Resend
+  // 6. SEND EMAIL via Gmail API
   await sendMail({
     to: normEmail,
     subject: "ZRP Account Verification",
@@ -143,8 +140,7 @@ router.post("/", async (req, res) => {
 
   return res.status(201).json({
     success: true,
-    message:
-      "Account created. Check email to verify.",
+    message: "Account created. Check email to verify.",
   });
 });
 
