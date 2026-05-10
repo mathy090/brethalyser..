@@ -8,7 +8,7 @@ import { createServer } from "http";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
-import rateLimit, { ipKeyGenerator } from "express-rate-limit"; // ✅ Added ipKeyGenerator
+import rateLimit from "express-rate-limit";
 
 import { env } from "./config/env";
 import { connectMongo } from "./config/mongo";
@@ -148,7 +148,7 @@ app.use(blockCommercialVPN);
 console.log("✅ VPN blocker active");
 
 // ─────────────────────────────────────────────
-// RATE LIMITER (IPv6-SAFE ✅)
+// RATE LIMITER (BUN-COMPATIBLE ✅)
 // ─────────────────────────────────────────────
 console.log("🚦 Configuring rate limiter...");
 
@@ -157,11 +157,7 @@ const publicLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  // ✅ IPv6-safe key generator
-  keyGenerator: ipKeyGenerator({
-    ipv6SubnetBits: 64,
-    ipv4SubnetBits: 32,
-  }),
+  // ✅ Using default keyGenerator (IPv6-safe + Bun-compatible)
   handler: (req, res) => {
     console.log("🚫 RATE LIMIT EXCEEDED | IP:", req.ip);
     return res.status(429).json({
@@ -178,11 +174,7 @@ const loginLimiter = rateLimit({
   max: 5, // 5 login attempts per 15 min
   standardHeaders: true,
   legacyHeaders: false,
-  // ✅ IPv6-safe key generator
-  keyGenerator: ipKeyGenerator({
-    ipv6SubnetBits: 64,
-    ipv4SubnetBits: 32,
-  }),
+  // ✅ Using default keyGenerator (IPv6-safe + Bun-compatible)
   handler: (req, res) => {
     console.log("🔐 LOGIN RATE LIMIT | IP:", req.ip);
     return res.status(429).json({

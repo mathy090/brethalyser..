@@ -17,8 +17,19 @@
 
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import { useNavigate, Link, useLocation }                    from "react-router-dom";
-import { loginOfficer }                                      from "../auth/authService";
-import { useOfficer }                                        from "../context/OfficerContext";
+import { signInWithEmailAndPassword, signOut }                from "firebase/auth";
+import axios, { type AxiosError }                             from "axios";
+
+import { auth } from "../auth/firebaseConfig";
+import { useOfficer }                                         from "../context/OfficerContext";
+
+// ─── API client ───────────────────────────────────────────────────────────────
+
+const api = axios.create({
+  baseURL: import.meta.env.VITE_BACKEND_URL,
+  timeout: 15_000,
+  headers: { "Content-Type": "application/json" },
+});
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -391,11 +402,74 @@ export default function Login() {
     setFieldErrors({});
     setLoading(true);
 
-    const result = await loginOfficer(normId, normEmail, password);
-    setLoading(false);
+    try {
+      // 🔹 Step 1: Firebase credential verification
+      const credential = await signInWithEmailAndPassword(auth, normEmail, password);
+      const firebaseUser = credential.user;
+      const idToken = await firebaseUser.getIdToken();
 
-    if (!result.success) {
-      const resolved = resolveError(result.code, result.message);
+      // 🔹 Step 2: Exchange Firebase token for backend JWT
+      const response = await api.post(
+        "/api/auth/login", // ✅ Direct endpoint call
+        { officerId: normId },
+        { headers: { Authorization: `Bearer ${idToken}` } }
+      );
+
+      const data = response.data;
+
+      if (!data?.token) {
+        throw new Error("Backend did not return an authentication token.");
+      }
+
+      // 🔹 Step 3: Persist session (matches your existing flow)
+      localStorage.setItem("jwt_token", data.token);
+      localStorage.setItem("officer_id", data.officerId);
+      localStorage.setItem("user_uid", firebaseUser.uid);
+      localStorage.setItem("jwt_expires_at", String(Date.now() + 5 * 60 * 1000));
+
+      // 🔹 Step 4: Set officer context and navigate
+      await setOfficer({
+        uid:       firebaseUser.uid,
+        officerId: data.officerId,
+        role:      data.role as "admin" | "officer",
+        status:    data.status as "active" | "rejected" | "pending",
+      });
+
+      navigate("/dashboard", { replace: true });
+
+    } catch (err: any) {
+      // 🔹 Error handling — same error mapping as before
+      await signOut(auth).catch(() => null);
+
+      let code = "SERVER_ERROR";
+      let message = "An unexpected error occurred. Please try again.";
+
+      // Firebase errors
+      if (err.code?.startsWith("auth/")) {
+        const fbMap: Record<string, string> = {
+          "auth/invalid-credential": "INVALID_CREDENTIAL",
+          "auth/wrong-password": "INVALID_CREDENTIAL",
+          "auth/user-not-found": "USER_NOT_FOUND",
+          "auth/too-many-requests": "TOO_MANY_REQUESTS",
+          "auth/user-disabled": "USER_DISABLED",
+          "auth/network-request-failed": "NETWORK_ERROR",
+        };
+        code = fbMap[err.code] ?? err.code.replace("auth/", "").toUpperCase().replace(/-/g, "_");
+        message = err.message ?? "Firebase authentication failed.";
+      }
+      // Axios / backend errors
+      else if (err.isAxiosError) {
+        const axiosErr = err as AxiosError<{ code?: string; message?: string }>;
+        if (axiosErr.response) {
+          code = axiosErr.response.data?.code ?? `HTTP_${axiosErr.response.status}`;
+          message = axiosErr.response.data?.message ?? axiosErr.message ?? "Server error.";
+        } else if (axiosErr.request) {
+          code = "NETWORK_ERROR";
+          message = "Unable to reach the server. Please check your connection.";
+        }
+      }
+
+      const resolved = resolveError(code, message);
       if (resolved.field) {
         setFieldErrors({ [resolved.field]: resolved.message });
       }
@@ -404,18 +478,9 @@ export default function Login() {
         title:   resolved.title,
         message: resolved.message,
       });
-      return;
+    } finally {
+      setLoading(false);
     }
-
-    // Persist officer context and navigate
-    await setOfficer({
-      uid:      result.uid,
-      officerId: result.officerId,
-      role:     result.role as "admin" | "officer",
-      status:   result.status as "active" | "rejected" | "pending",
-    });
-
-    navigate("/dashboard", { replace: true });
   };
 
   // ─── Render ─────────────────────────────────────────────────────────────────
