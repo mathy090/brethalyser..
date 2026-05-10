@@ -18,7 +18,7 @@ import { blockCommercialVPN } from "./middleware/vpnBlocker";
 
 // Routes
 import registerRoutes from "./routes/register";
-import loginRoutes from "./routes/login"; // 🔐 LOGIN ROUTE
+import loginRoutes from "../src/auth/login"; // 🔐 LOGIN ROUTE
 // import authRoutes from "./routes/auth"; // 👈 Uncomment ONLY if you have other /api/auth/* routes
 import adminRoutes from "./routes/admin";
 import uploadRoutes from "./routes/upload";
