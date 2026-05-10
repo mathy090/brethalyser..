@@ -18,7 +18,7 @@ import { blockCommercialVPN } from "./middleware/vpnBlocker";
 
 // Routes
 import registerRoutes from "./routes/register";
-import loginRoutes from "../src/auth/login"; // 🔐 LOGIN ROUTE
+import loginRoutes from "./auth/login"; // 🔐 CORRECTED PATH: src/auth/login.ts
 // import authRoutes from "./routes/auth"; // 👈 Uncomment ONLY if you have other /api/auth/* routes
 import adminRoutes from "./routes/admin";
 import uploadRoutes from "./routes/upload";
@@ -157,7 +157,6 @@ const publicLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  // ✅ Using default keyGenerator (IPv6-safe + Bun-compatible)
   handler: (req, res) => {
     console.log("🚫 RATE LIMIT EXCEEDED | IP:", req.ip);
     return res.status(429).json({
@@ -168,13 +167,11 @@ const publicLimiter = rateLimit({
   },
 });
 
-// Stricter limiter for login attempts
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5, // 5 login attempts per 15 min
+  max: 5,
   standardHeaders: true,
   legacyHeaders: false,
-  // ✅ Using default keyGenerator (IPv6-safe + Bun-compatible)
   handler: (req, res) => {
     console.log("🔐 LOGIN RATE LIMIT | IP:", req.ip);
     return res.status(429).json({
