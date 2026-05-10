@@ -1,131 +1,168 @@
-// src/auth/authService.ts
+/**
+ * src/auth/authService.ts
+ *
+ * Authentication service for the ZRP Admin web application.
+ * All registration logic runs server-side — no Firebase client SDK involved
+ * in the register flow. Login still uses Firebase client SDK to obtain an
+ * ID token which the backend then validates.
+ */
+
 import {
-  createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
-  sendEmailVerification,
   signOut,
-  User,
 } from "firebase/auth";
 import { auth } from "./firebaseConfig";
-import axios from "axios";
+import axios, { type AxiosError } from "axios";
 
-// Backend API instance
+// ─── API client ───────────────────────────────────────────────────────────────
+
 const api = axios.create({
   baseURL: import.meta.env.VITE_BACKEND_URL,
-  timeout: 10_000,
+  timeout: 15_000,
   headers: { "Content-Type": "application/json" },
 });
 
-export type AuthResult =
-  | { success: true; uid: string; role: string; status: string; officerId: string; idToken?: string }
-  | { success: false; error: string };
+// ─── Result types ─────────────────────────────────────────────────────────────
 
-// ===== ✅ SIGNUP: Firebase SDK → Backend =====
-export const registerOfficer = async (
-  officerId: string,
-  email: string,
-  password: string
-): Promise<AuthResult> => {
-  try {
-    const { user } = await createUserWithEmailAndPassword(auth, email, password);
-    await sendEmailVerification(user);
-    const idToken = await user.getIdToken();
+export type RegisterResult =
+  | { success: true }
+  | { success: false; code: string; message: string };
 
-    await api.post(
-      "/api/auth/register",
-      { officerId, email },
-      { headers: { Authorization: `Bearer ${idToken}` } }
-    );
+export type LoginResult =
+  | { success: true; uid: string; role: string; status: string; officerId: string }
+  | { success: false; code: string; message: string };
 
-    return { 
-      success: true, 
-      uid: user.uid, 
-      role: "officer", 
-      status: "pending", 
-      officerId,
-      idToken 
-    };
-  } catch (error: any) {
-    if (error.code === "auth/email-already-in-use") {
-      return { success: false, error: "This email is already registered." };
-    }
-    if (error.code === "auth/weak-password") {
-      return { success: false, error: "Password must be at least 6 characters." };
-    }
-    if (error.code === "auth/invalid-email") {
-      return { success: false, error: "Invalid email address." };
-    }
-    if (!error.response && !error.code?.startsWith("auth/")) {
-      return { success: false, error: "Network error. Check your connection." };
-    }
-    return { 
-      success: false, 
-      error: error.response?.data?.message || error.message || "Registration failed" 
+// ─── Error normaliser ─────────────────────────────────────────────────────────
+
+function normaliseAxiosError(err: unknown): { code: string; message: string } {
+  const ax = err as AxiosError<{ code?: string; message?: string; error?: string }>;
+
+  if (ax.response) {
+    const data   = ax.response.data ?? {};
+    const code   = data.code    ?? "SERVER_ERROR";
+    const message = data.message ?? data.error ?? "An unexpected server error occurred.";
+    return { code, message };
+  }
+
+  if (ax.request) {
+    return {
+      code:    "NETWORK_ERROR",
+      message: "Network error — check your internet connection.",
     };
   }
-};
 
-// ===== ✅ LOGIN: Firebase → Backend (THIS WAS MISSING) =====
-export const loginOfficer = async (
+  return {
+    code:    "CLIENT_ERROR",
+    message: (err as Error).message ?? "An unexpected error occurred.",
+  };
+}
+
+// ─── Register — fully server-side ─────────────────────────────────────────────
+
+/**
+ * Registers a new officer by sending credentials to the backend.
+ * The backend handles:
+ *  - Duplicate officerId check (MongoDB)
+ *  - Duplicate email check (Firebase Admin)
+ *  - Firebase user creation
+ *  - Email verification dispatch
+ *  - MongoDB officer record creation (status: pending)
+ */
+export async function registerOfficer(
   officerId: string,
-  email: string,
-  password: string
-): Promise<AuthResult> => {
+  email:     string,
+  password:  string
+): Promise<RegisterResult> {
   try {
-    // Step 1: Firebase verifies credentials
-    const { user } = await signInWithEmailAndPassword(auth, email, password);
+    await api.post("/api/auth/register", {
+      officerId: officerId.trim().toUpperCase(),
+      email:     email.trim().toLowerCase(),
+      password,
+    });
 
-    // Step 2: Get Firebase ID token
-    const idToken = await user.getIdToken();
+    return { success: true };
+  } catch (err) {
+    const { code, message } = normaliseAxiosError(err);
+    return { success: false, code, message };
+  }
+}
 
-    // Step 3: Backend verifies token + returns role/JWT
-    const { data } = await api.post(
+// ─── Login ────────────────────────────────────────────────────────────────────
+
+/**
+ * Signs the officer in via Firebase client SDK (to obtain an ID token),
+ * then exchanges the ID token with the backend for a signed JWT.
+ */
+export async function loginOfficer(
+  officerId: string,
+  email:     string,
+  password:  string
+): Promise<LoginResult> {
+  try {
+    // Step 1: Firebase client SDK verifies credentials
+    const { user } = await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
+
+    // Step 2: Exchange Firebase ID token for a BlowSafe JWT
+    const idToken     = await user.getIdToken();
+    const { data }    = await api.post(
       "/api/auth/login",
-      { officerId },
+      { officerId: officerId.trim().toUpperCase() },
       { headers: { Authorization: `Bearer ${idToken}` } }
     );
 
-    if (!data?.token) throw new Error("Backend did not return a token");
+    if (!data?.token) throw new Error("Backend did not return a token.");
 
-    // Step 4: Store JWT in localStorage
+    // Step 3: Persist session
     localStorage.setItem("jwt_token", data.token);
-    localStorage.setItem("officer_id", officerId);
-    localStorage.setItem("user_uid", user.uid);
+    localStorage.setItem("officer_id", data.officerId);
+    localStorage.setItem("user_uid",   user.uid);
 
     return {
-      success: true,
-      uid: user.uid,
-      role: data.role,
-      status: data.status,
-      officerId,
-      idToken,
+      success:   true,
+      uid:       user.uid,
+      role:      data.role,
+      status:    data.status,
+      officerId: data.officerId,
     };
-  } catch (error: any) {
-    await signOut(auth).catch(() => {});
+  } catch (err: any) {
+    await signOut(auth).catch(() => null);
 
-    if (!error.response && !error.code?.startsWith("auth/")) {
-      return { success: false, error: "Network error. Check your connection." };
+    // Firebase client errors
+    const firebaseMap: Record<string, string> = {
+      "auth/invalid-credential": "Invalid email or password.",
+      "auth/wrong-password":     "Invalid email or password.",
+      "auth/user-not-found":     "No account found with this email.",
+      "auth/too-many-requests":  "Too many attempts — please wait before trying again.",
+      "auth/user-disabled":      "This account has been disabled.",
+    };
+
+    if (err?.code && firebaseMap[err.code]) {
+      return {
+        success: false,
+        code:    err.code.replace("auth/", "").toUpperCase().replace(/-/g, "_"),
+        message: firebaseMap[err.code],
+      };
     }
-    if (error.code === "auth/invalid-credential" || error.code === "auth/wrong-password") {
-      return { success: false, error: "Invalid email or password." };
+
+    // Axios / backend errors
+    if (err?.response || err?.request) {
+      const { code, message } = normaliseAxiosError(err);
+      return { success: false, code, message };
     }
-    if (error.code === "auth/user-not-found") {
-      return { success: false, error: "No account found with this email." };
-    }
-    if (error.code === "auth/too-many-requests") {
-      return { success: false, error: "Too many attempts. Try again later." };
-    }
-    return { 
-      success: false, 
-      error: error.response?.data?.message || error.message || "Login failed." 
+
+    return {
+      success: false,
+      code:    "UNKNOWN",
+      message: err?.message ?? "Login failed — please try again.",
     };
   }
-};
+}
 
-// ===== LOGOUT =====
-export const logoutOfficer = async (): Promise<void> => {
-  await signOut(auth);
+// ─── Logout ───────────────────────────────────────────────────────────────────
+
+export async function logoutOfficer(): Promise<void> {
+  await signOut(auth).catch(() => null);
   localStorage.removeItem("jwt_token");
   localStorage.removeItem("officer_id");
   localStorage.removeItem("user_uid");
-};
+}
