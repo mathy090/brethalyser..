@@ -8,7 +8,7 @@ import { createServer } from "http";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit"; // ✅ Added ipKeyGenerator
 
 import { env } from "./config/env";
 import { connectMongo } from "./config/mongo";
@@ -19,6 +19,7 @@ import { blockCommercialVPN } from "./middleware/vpnBlocker";
 // Routes
 import registerRoutes from "./routes/register";
 import loginRoutes from "./routes/login"; // 🔐 LOGIN ROUTE
+// import authRoutes from "./routes/auth"; // 👈 Uncomment ONLY if you have other /api/auth/* routes
 import adminRoutes from "./routes/admin";
 import uploadRoutes from "./routes/upload";
 import recordsRoutes from "./routes/records";
@@ -147,7 +148,7 @@ app.use(blockCommercialVPN);
 console.log("✅ VPN blocker active");
 
 // ─────────────────────────────────────────────
-// RATE LIMITER
+// RATE LIMITER (IPv6-SAFE ✅)
 // ─────────────────────────────────────────────
 console.log("🚦 Configuring rate limiter...");
 
@@ -156,14 +157,11 @@ const publicLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) =>
-    (
-      req.headers["cf-connecting-ip"] ||
-      req.headers["x-forwarded-for"] ||
-      req.ip ||
-      req.socket.remoteAddress ||
-      "unknown"
-    ).toString(),
+  // ✅ IPv6-safe key generator
+  keyGenerator: ipKeyGenerator({
+    ipv6SubnetBits: 64,
+    ipv4SubnetBits: 32,
+  }),
   handler: (req, res) => {
     console.log("🚫 RATE LIMIT EXCEEDED | IP:", req.ip);
     return res.status(429).json({
@@ -180,13 +178,11 @@ const loginLimiter = rateLimit({
   max: 5, // 5 login attempts per 15 min
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) =>
-    (
-      req.headers["cf-connecting-ip"] ||
-      req.headers["x-forwarded-for"] ||
-      req.ip ||
-      "unknown"
-    ).toString(),
+  // ✅ IPv6-safe key generator
+  keyGenerator: ipKeyGenerator({
+    ipv6SubnetBits: 64,
+    ipv4SubnetBits: 32,
+  }),
   handler: (req, res) => {
     console.log("🔐 LOGIN RATE LIMIT | IP:", req.ip);
     return res.status(429).json({
@@ -210,8 +206,8 @@ app.use("/api/auth/register", publicLimiter, registerRoutes);
 // 🔐 LOGIN ROUTE (with stricter rate limiting + logging)
 app.use("/api/auth/login", loginLimiter, loginRoutes);
 
-// Other auth routes
-app.use("/api/auth", authRoutes);
+// 👇 Other auth routes — UNCOMMENT ONLY if you have ./routes/auth.ts
+// app.use("/api/auth", authRoutes);
 
 // Protected routes
 app.use("/api/admin", adminRoutes);
