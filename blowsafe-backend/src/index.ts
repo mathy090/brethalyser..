@@ -1,6 +1,6 @@
 /**
  * blowsafe-backend/src/index.ts
- * BlowSafe API server entry point (FULL LOGGING VERSION)
+ * BlowSafe API server entry point (ADVANCED LOGGING VERSION)
  */
 
 import express from "express";
@@ -27,12 +27,22 @@ const app = express();
 const httpServer = createServer(app);
 
 // ─────────────────────────────────────────────
-// SECURITY CORE
+// BOOT LOG
+// ─────────────────────────────────────────────
+console.log("\n========================================");
+console.log("🚀 BOOTING BLOWSAFE BACKEND");
+console.log("🌍 Environment:", env.NODE_ENV);
+console.log("🌐 Port:", env.PORT);
+console.log("⏰ Started:", new Date().toISOString());
+console.log("========================================\n");
+
+// ─────────────────────────────────────────────
+// SECURITY
 // ─────────────────────────────────────────────
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 
-console.log("🛡️ Initializing security middleware...");
+console.log("🛡️ Loading security middleware...");
 
 app.use(
   helmet({
@@ -51,25 +61,39 @@ console.log("🌍 Configuring CORS...");
 
 app.use(
   cors({
-    origin: env.NODE_ENV === "production"
-      ? env.CORS_ORIGIN
-      : "*",
+    origin:
+      env.NODE_ENV === "production"
+        ? env.CORS_ORIGIN
+        : "*",
 
     credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+
+    methods: [
+      "GET",
+      "POST",
+      "PUT",
+      "DELETE",
+      "PATCH",
+    ],
+
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+    ],
   })
 );
 
-console.log("✅ CORS configured");
+console.log("✅ CORS ready");
 
 // ─────────────────────────────────────────────
 // BODY PARSER
 // ─────────────────────────────────────────────
+console.log("📦 Initializing body parser...");
+
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-console.log("✅ Body parser initialized");
+console.log("✅ Body parser ready");
 
 // ─────────────────────────────────────────────
 // REQUEST LOGGER
@@ -81,7 +105,8 @@ app.use((req, res, next) => {
     req.headers["cf-connecting-ip"] ||
     req.headers["x-forwarded-for"] ||
     req.ip ||
-    req.socket.remoteAddress;
+    req.socket.remoteAddress ||
+    "unknown";
 
   console.log("\n========================================");
   console.log("📥 Incoming Request");
@@ -90,8 +115,16 @@ app.use((req, res, next) => {
   console.log("IP     :", ip);
   console.log("Time   :", new Date().toISOString());
 
-  if (Object.keys(req.body || {}).length > 0) {
-    console.log("Body   :", req.body);
+  if (
+    req.body &&
+    Object.keys(req.body).length > 0
+  ) {
+    console.log("Body   :", {
+      ...req.body,
+      password: req.body.password
+        ? "********"
+        : undefined,
+    });
   }
 
   res.on("finish", () => {
@@ -117,7 +150,7 @@ app.use(blockCommercialVPN);
 console.log("✅ VPN blocker active");
 
 // ─────────────────────────────────────────────
-// RATE LIMIT
+// RATE LIMITER
 // ─────────────────────────────────────────────
 console.log("🚦 Configuring rate limiter...");
 
@@ -138,7 +171,7 @@ const publicLimiter = rateLimit({
   },
 
   handler: (req, res) => {
-    console.log("🚫 RATE LIMIT HIT");
+    console.log("🚫 RATE LIMIT EXCEEDED");
     console.log("IP:", req.ip);
 
     return res.status(429).json({
@@ -156,7 +189,12 @@ console.log("✅ Rate limiter ready");
 // ─────────────────────────────────────────────
 console.log("🛣️ Loading routes...");
 
-app.use("/api/auth/register", publicLimiter, registerRoutes);
+app.use(
+  "/api/auth/register",
+  publicLimiter,
+  registerRoutes
+);
+
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api", uploadRoutes);
@@ -165,7 +203,7 @@ app.use("/api", recordsRoutes);
 console.log("✅ Routes loaded");
 
 // ─────────────────────────────────────────────
-// HEALTH CHECK
+// ROOT
 // ─────────────────────────────────────────────
 app.get("/", (_req, res) => {
   console.log("🏠 Root endpoint hit");
@@ -177,8 +215,11 @@ app.get("/", (_req, res) => {
   });
 });
 
+// ─────────────────────────────────────────────
+// HEALTH
+// ─────────────────────────────────────────────
 app.get("/health", (_req, res) => {
-  console.log("💓 Health check requested");
+  console.log("💓 Health check hit");
 
   res.json({
     status: "ok",
@@ -187,15 +228,15 @@ app.get("/health", (_req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// 404 HANDLER
+// 404
 // ─────────────────────────────────────────────
 app.use((req, res) => {
-  console.log("❌ 404 Not Found:", req.originalUrl);
+  console.log("❌ 404 Endpoint:", req.originalUrl);
 
   res.status(404).json({
     success: false,
     code: "NOT_FOUND",
-    message: "Endpoint not found",
+    error: "Endpoint not found",
     path: req.path,
   });
 });
@@ -215,21 +256,27 @@ app.use((
   }
 
   console.log("\n========================================");
-  console.log("❌ GLOBAL ERROR HANDLER");
-  console.log("Path    :", req.originalUrl);
-  console.log("Method  :", req.method);
-  console.log("Message :", err.message);
-  console.log("Code    :", err.code);
-  console.log("Stack   :", err.stack);
+  console.log("❌ GLOBAL ERROR");
+  console.log("Path   :", req.originalUrl);
+  console.log("Method :", req.method);
+  console.log("Code   :", err.code);
+  console.log("Message:", err.message);
+
+  if (err.stack) {
+    console.log("Stack:");
+    console.log(err.stack);
+  }
+
   console.log("========================================\n");
 
-  // ─────────────────────────────────────────
-  // MONGO DUPLICATE
-  // ─────────────────────────────────────────
+  // Mongo duplicate
   if (err.code === 11000) {
-    const field = Object.keys(err.keyPattern || {})[0];
 
-    console.log("🚫 Mongo duplicate:", field);
+    const field = Object.keys(
+      err.keyPattern || {}
+    )[0];
+
+    console.log("🚫 Mongo Duplicate:", field);
 
     return res.status(409).json({
       success: false,
@@ -238,72 +285,67 @@ app.use((
           ? "OFFICER_ID_EXISTS"
           : "EMAIL_EXISTS",
 
-      field,
       error:
         field === "officerId"
-          ? "Officer ID already in use"
-          : "Email already registered",
+          ? "Officer ID already exists"
+          : "Email already exists",
     });
   }
 
-  // ─────────────────────────────────────────
-  // FIREBASE ERRORS
-  // ─────────────────────────────────────────
+  // Firebase errors
   if (err.code?.startsWith("auth/")) {
 
-    console.log("🔥 Firebase error:", err.code);
+    console.log("🔥 Firebase Error:", err.code);
 
-    const firebaseErrors: Record<string, any> = {
-      "auth/email-already-exists": {
-        status: 409,
-        code: "EMAIL_EXISTS",
-        field: "email",
-      },
-
-      "auth/invalid-email": {
-        status: 400,
-        code: "INVALID_EMAIL",
-        field: "email",
-      },
-
-      "auth/weak-password": {
-        status: 400,
-        code: "WEAK_PASSWORD",
-        field: "password",
-      },
-    };
-
-    const mapped = firebaseErrors[err.code];
-
-    if (mapped) {
-      return res.status(mapped.status).json({
+    if (
+      err.code ===
+      "auth/email-already-exists"
+    ) {
+      return res.status(409).json({
         success: false,
-        code: mapped.code,
-        field: mapped.field,
-        error: err.message,
+        code: "EMAIL_EXISTS",
+        error: "Email already exists",
+      });
+    }
+
+    if (
+      err.code ===
+      "auth/invalid-email"
+    ) {
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_EMAIL",
+        error: "Invalid email",
+      });
+    }
+
+    if (
+      err.code ===
+      "auth/weak-password"
+    ) {
+      return res.status(400).json({
+        success: false,
+        code: "WEAK_PASSWORD",
+        error: "Weak password",
       });
     }
   }
 
-  // ─────────────────────────────────────────
-  // VALIDATION
-  // ─────────────────────────────────────────
+  // Validation
   if (err.name === "ValidationError") {
 
-    console.log("⚠️ Validation error");
+    console.log("⚠️ Validation Error");
 
     return res.status(400).json({
       success: false,
       code: "VALIDATION_ERROR",
-      errors: Object.values(err.errors).map(
+      error: Object.values(err.errors).map(
         (e: any) => e.message
       ),
     });
   }
 
-  // ─────────────────────────────────────────
-  // FALLBACK
-  // ─────────────────────────────────────────
+  // Fallback
   return res.status(500).json({
     success: false,
     code: "INTERNAL_ERROR",
@@ -318,40 +360,45 @@ app.use((
 // START SERVER
 // ─────────────────────────────────────────────
 async function startServer() {
+
   try {
 
-    console.log("\n🚀 Starting BlowSafe Backend...");
-    console.log("Environment:", env.NODE_ENV);
-    console.log("Port:", env.PORT);
+    console.log("🗄️ Connecting MongoDB...");
 
-    // Mongo
-    console.log("\n🗄️ Connecting MongoDB...");
     await connectMongo();
+
     console.log("✅ MongoDB connected");
 
-    // Firebase
-    console.log("\n🔥 Initializing Firebase Admin...");
-    await initFirebaseAdmin();
-    console.log("✅ Firebase Admin ready");
+    console.log("🔥 Initializing Firebase Admin...");
 
-    // Socket
-    console.log("\n🔌 Initializing sockets...");
+    await initFirebaseAdmin();
+
+    console.log("✅ Firebase Admin initialized");
+
+    console.log("🔌 Initializing sockets...");
+
     initSocket(httpServer);
+
     console.log("✅ Socket server ready");
 
-    // Start HTTP server
-    httpServer.listen(env.PORT, "0.0.0.0", () => {
-      console.log("\n========================================");
-      console.log("🚀 BlowSafe Backend LIVE");
-      console.log("🌍 Port :", env.PORT);
-      console.log("🌎 Env  :", env.NODE_ENV);
-      console.log("========================================\n");
-    });
+    httpServer.listen(
+      env.PORT,
+      "0.0.0.0",
+      () => {
+
+        console.log("\n========================================");
+        console.log("🚀 BLOWSAFE BACKEND LIVE");
+        console.log("🌍 Environment:", env.NODE_ENV);
+        console.log("🌐 Port:", env.PORT);
+        console.log("⏰ Live At:", new Date().toISOString());
+        console.log("========================================\n");
+      }
+    );
 
   } catch (err) {
 
     console.log("\n========================================");
-    console.log("❌ STARTUP FAILED");
+    console.log("❌ SERVER START FAILED");
     console.log(err);
     console.log("========================================\n");
 
@@ -381,7 +428,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 // ─────────────────────────────────────────────
-// START
+// START APP
 // ─────────────────────────────────────────────
 startServer();
 
