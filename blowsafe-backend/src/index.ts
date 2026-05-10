@@ -18,7 +18,7 @@ import { blockCommercialVPN } from "./middleware/vpnBlocker";
 
 // Routes
 import registerRoutes from "./routes/register";
-import loginRoutes from "./auth/login"; // 🔐 CORRECTED PATH: src/auth/login.ts
+import loginRoutes from "./auth/login"; // 🔐 Exact match: src/auth/login.ts
 // import authRoutes from "./routes/auth"; // 👈 Uncomment ONLY if you have other /api/auth/* routes
 import adminRoutes from "./routes/admin";
 import uploadRoutes from "./routes/upload";
@@ -98,7 +98,6 @@ app.use((req, res, next) => {
     req.socket.remoteAddress ||
     "unknown";
 
-  // Skip logging for health checks to reduce noise
   const isHealthCheck = req.path === "/health" || req.path === "/";
   
   if (!isHealthCheck) {
@@ -109,7 +108,6 @@ app.use((req, res, next) => {
     console.log("IP     :", ip);
     console.log("Time   :", new Date().toISOString());
 
-    // Log body (sanitize sensitive fields)
     if (req.body && Object.keys(req.body).length > 0) {
       const sanitized = { ...req.body };
       if (sanitized.password) sanitized.password = "********";
@@ -118,7 +116,6 @@ app.use((req, res, next) => {
     }
   }
 
-  // Capture response details
   const originalJson = res.json.bind(res);
   res.json = (data) => {
     if (!isHealthCheck) {
@@ -128,7 +125,6 @@ app.use((req, res, next) => {
       console.log("Status :", res.statusCode);
       console.log("Time   :", `${duration}ms`);
       
-      // Log response body for errors or login attempts
       if (res.statusCode >= 400 || req.path.includes("/login")) {
         console.log("Response:", data);
       }
@@ -159,11 +155,7 @@ const publicLimiter = rateLimit({
   legacyHeaders: false,
   handler: (req, res) => {
     console.log("🚫 RATE LIMIT EXCEEDED | IP:", req.ip);
-    return res.status(429).json({
-      success: false,
-      code: "RATE_LIMITED",
-      error: "Too many requests",
-    });
+    return res.status(429).json({ success: false, code: "RATE_LIMITED", error: "Too many requests" });
   },
 });
 
@@ -174,28 +166,24 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
   handler: (req, res) => {
     console.log("🔐 LOGIN RATE LIMIT | IP:", req.ip);
-    return res.status(429).json({
-      success: false,
-      code: "LOGIN_RATE_LIMITED",
-      message: "Too many login attempts. Try again in 15 minutes.",
-    });
+    return res.status(429).json({ success: false, code: "LOGIN_RATE_LIMITED", message: "Too many login attempts. Try again in 15 minutes." });
   },
 });
 
 console.log("✅ Rate limiter ready");
 
 // ─────────────────────────────────────────────
-// ROUTES
+// ROUTES (MOUNTED EXACTLY)
 // ─────────────────────────────────────────────
 console.log("🛣️ Loading routes...");
 
-// Register (public)
+// Public register
 app.use("/api/auth/register", publicLimiter, registerRoutes);
 
-// 🔐 LOGIN ROUTE (with stricter rate limiting + logging)
+// 🔐 LOGIN ROUTE (matches POST /api/auth/login)
 app.use("/api/auth/login", loginLimiter, loginRoutes);
 
-// 👇 Other auth routes — UNCOMMENT ONLY if you have ./routes/auth.ts
+// 👇 Uncomment ONLY if you have ./routes/auth.ts with other auth endpoints
 // app.use("/api/auth", authRoutes);
 
 // Protected routes
@@ -210,22 +198,14 @@ console.log("✅ Routes loaded");
 // ─────────────────────────────────────────────
 app.get("/", (_req, res) => {
   console.log("🏠 Root endpoint hit");
-  res.json({
-    status: "ok",
-    app: "BlowSafe",
-    version: "1.0.0",
-  });
+  res.json({ status: "ok", app: "BlowSafe", version: "1.0.0" });
 });
 
 // ─────────────────────────────────────────────
 // HEALTH
 // ─────────────────────────────────────────────
 app.get("/health", (_req, res) => {
-  res.json({
-    status: "ok",
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-  });
+  res.json({ status: "ok", uptime: process.uptime(), timestamp: new Date().toISOString() });
 });
 
 // ─────────────────────────────────────────────
@@ -233,12 +213,7 @@ app.get("/health", (_req, res) => {
 // ─────────────────────────────────────────────
 app.use((req, res) => {
   console.log("❌ 404 | Path:", req.originalUrl, "| IP:", req.ip);
-  res.status(404).json({
-    success: false,
-    code: "NOT_FOUND",
-    error: "Endpoint not found",
-    path: req.path,
-  });
+  res.status(404).json({ success: false, code: "NOT_FOUND", error: "Endpoint not found", path: req.path });
 });
 
 // ─────────────────────────────────────────────
@@ -261,7 +236,6 @@ app.use((
   if (err.stack) console.log("Stack:\n", err.stack);
   console.log("========================================\n");
 
-  // Mongo duplicate key
   if (err.code === 11000) {
     const field = Object.keys(err.keyPattern || {})[0];
     console.log("🚫 Mongo Duplicate:", field);
@@ -272,7 +246,6 @@ app.use((
     });
   }
 
-  // Firebase auth errors
   if (err.code?.startsWith("auth/")) {
     console.log("🔥 Firebase Error:", err.code);
     const firebaseErrors: Record<string, { status: number; code: string; message: string }> = {
@@ -283,31 +256,15 @@ app.use((
       "auth/invalid-id-token": { status: 401, code: "INVALID_TOKEN", message: "Invalid token" },
     };
     const fbErr = firebaseErrors[err.code];
-    if (fbErr) {
-      return res.status(fbErr.status).json({
-        success: false,
-        code: fbErr.code,
-        error: fbErr.message,
-      });
-    }
+    if (fbErr) return res.status(fbErr.status).json({ success: false, code: fbErr.code, error: fbErr.message });
   }
 
-  // Validation errors
   if (err.name === "ValidationError") {
     console.log("⚠️ Validation Error");
-    return res.status(400).json({
-      success: false,
-      code: "VALIDATION_ERROR",
-      error: Object.values(err.errors).map((e: any) => e.message),
-    });
+    return res.status(400).json({ success: false, code: "VALIDATION_ERROR", error: Object.values(err.errors).map((e: any) => e.message) });
   }
 
-  // Fallback
-  return res.status(500).json({
-    success: false,
-    code: "INTERNAL_ERROR",
-    error: env.NODE_ENV === "production" ? "Internal server error" : err.message,
-  });
+  return res.status(500).json({ success: false, code: "INTERNAL_ERROR", error: env.NODE_ENV === "production" ? "Internal server error" : err.message });
 });
 
 // ─────────────────────────────────────────────
@@ -345,9 +302,6 @@ async function startServer() {
   }
 }
 
-// ─────────────────────────────────────────────
-// PROCESS ERROR HANDLERS
-// ─────────────────────────────────────────────
 process.on("uncaughtException", (err) => {
   console.log("\n========================================");
   console.log("❌ UNCAUGHT EXCEPTION");
@@ -363,9 +317,6 @@ process.on("unhandledRejection", (reason) => {
   console.log("========================================\n");
 });
 
-// ─────────────────────────────────────────────
-// START
-// ─────────────────────────────────────────────
 startServer();
 
 export { app, httpServer };
