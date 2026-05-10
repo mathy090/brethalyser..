@@ -10,31 +10,16 @@ const router = Router();
 const validateRegistration = (body: any) => {
   const { officerId, email, password } = body;
 
-  if (
-    !officerId ||
-    !/^[A-Z]\d{6}[A-Z]$|^\d{9}$/i.test(officerId)
-  ) {
-    return {
-      code: "INVALID_OFFICER_ID",
-      message: "Invalid Officer ID format",
-    };
+  if (!officerId || !/^[A-Z]\d{6}[A-Z]$|^\d{9}$/i.test(officerId)) {
+    return { code: "INVALID_OFFICER_ID", message: "Invalid Officer ID format" };
   }
 
-  if (
-    !email ||
-    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
-  ) {
-    return {
-      code: "INVALID_EMAIL",
-      message: "Invalid email address",
-    };
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { code: "INVALID_EMAIL", message: "Invalid email address" };
   }
 
   if (!password || password.length < 6) {
-    return {
-      code: "WEAK_PASSWORD",
-      message: "Password must be at least 6 characters",
-    };
+    return { code: "WEAK_PASSWORD", message: "Password too short" };
   }
 
   return null;
@@ -44,35 +29,20 @@ const validateRegistration = (body: any) => {
 // REGISTER
 // ============================================
 router.post("/", async (req: Request, res: Response) => {
-
   const { officerId, email, password } = req.body;
 
-  const normalizedOfficerId =
-    officerId?.toUpperCase().trim();
-
-  const normalizedEmail =
-    email?.toLowerCase().trim();
+  const normalizedOfficerId = officerId?.toUpperCase().trim();
+  const normalizedEmail = email?.toLowerCase().trim();
 
   console.log("\n========================================");
   console.log("🚔 NEW REGISTRATION");
   console.log("Officer ID:", normalizedOfficerId);
   console.log("Email:", normalizedEmail);
-  console.log("IP:", req.ip);
   console.log("========================================");
 
-  // ============================================
   // 1. VALIDATION
-  // ============================================
-  const validationError =
-    validateRegistration(req.body);
-
+  const validationError = validateRegistration(req.body);
   if (validationError) {
-
-    console.log(
-      "❌ VALIDATION FAILED:",
-      validationError.code
-    );
-
     return res.status(400).json({
       success: false,
       code: validationError.code,
@@ -80,158 +50,75 @@ router.post("/", async (req: Request, res: Response) => {
     });
   }
 
-  // ============================================
-  // 2. CHECK OFFICER ID FIRST
-  // ============================================
-  console.log(
-    "🔍 Checking Officer ID..."
-  );
+  // 2. CHECK OFFICER ID (MONGO ONLY)
+  console.log("🔍 Checking Officer ID...");
 
-  const existingOfficer =
-    await Officer.findOne({
-      officerId: normalizedOfficerId,
-    });
+  const existingOfficer = await Officer.findOne({
+    officerId: normalizedOfficerId,
+  });
 
-  // Officer ID belongs to another email
-  if (
-    existingOfficer &&
-    existingOfficer.email.toLowerCase() !==
-      normalizedEmail
-  ) {
-
-    console.log(
-      "🚫 OFFICER ID ALREADY USED"
-    );
-
-    console.log(
-      "Existing Email:",
-      existingOfficer.email
-    );
+  if (existingOfficer) {
+    console.log("🚫 Officer ID already exists");
 
     return res.status(409).json({
       success: false,
       code: "OFFICER_ID_IN_USE",
-      error:
-        "Please use your official officer ID",
+      error: "Please use your official officer ID",
     });
   }
 
-  // Same account already exists
-  if (
-    existingOfficer &&
-    existingOfficer.email.toLowerCase() ===
-      normalizedEmail
-  ) {
+  console.log("✅ Officer ID OK");
 
-    console.log(
-      "🚫 ACCOUNT ALREADY EXISTS IN MONGODB"
-    );
-
-    return res.status(409).json({
-      success: false,
-      code: "ACCOUNT_EXISTS",
-      error: "Account already exists",
-    });
-  }
-
-  console.log(
-    "✅ Officer ID available"
-  );
-
-  // ============================================
   // 3. CHECK FIREBASE EMAIL
-  // ============================================
-  console.log(
-    "🔍 Checking Firebase email..."
-  );
-
-  let firebaseEmailExists = false;
+  console.log("🔍 Checking Firebase email...");
 
   try {
+    await adminAuth.getUserByEmail(normalizedEmail);
 
-    await adminAuth.getUserByEmail(
-      normalizedEmail
-    );
-
-    firebaseEmailExists = true;
-
-  } catch (err: any) {
-
-    if (
-      err.code === "auth/user-not-found"
-    ) {
-      firebaseEmailExists = false;
-    }
-  }
-
-  // Email already exists
-  if (firebaseEmailExists) {
-
-    console.log(
-      "🚫 EMAIL ALREADY EXISTS IN FIREBASE"
-    );
+    console.log("🚫 Email already exists in Firebase");
 
     return res.status(409).json({
       success: false,
       code: "EMAIL_EXISTS",
       error: "Account already exists",
     });
+  } catch (err: any) {
+    if (err.code !== "auth/user-not-found") {
+      return res.status(500).json({
+        success: false,
+        code: "FIREBASE_CHECK_FAILED",
+        error: err.message,
+      });
+    }
   }
 
-  console.log(
-    "✅ Firebase email available"
-  );
+  console.log("✅ Email available");
 
-  // ============================================
-  // 4. CREATE FIREBASE ACCOUNT
-  // ============================================
-  console.log(
-    "🔥 Creating Firebase account..."
-  );
+  // 4. CREATE FIREBASE USER
+  console.log("🔥 Creating Firebase user...");
 
-  const firebaseUser =
-    await adminAuth.createUser({
-      email: normalizedEmail,
-      password,
-      emailVerified: false,
-      disabled: false,
-    });
+  const firebaseUser = await adminAuth.createUser({
+    email: normalizedEmail,
+    password,
+    emailVerified: false,
+  });
 
-  console.log(
-    "✅ Firebase account created"
-  );
+  console.log("✅ Firebase user created:", firebaseUser.uid);
 
-  console.log(
-    "UID:",
-    firebaseUser.uid
-  );
-
-  // ============================================
-  // 5. GENERATE VERIFICATION LINK
-  // ============================================
-  console.log(
-    "📧 Generating verification link..."
-  );
+  // 5. SEND VERIFICATION LINK (ONLY TO THIS EMAIL)
+  console.log("📧 Sending verification link...");
 
   const verificationLink =
-    await adminAuth.generateEmailVerificationLink(
-      normalizedEmail
-    );
+    await adminAuth.generateEmailVerificationLink(normalizedEmail);
 
-  console.log(
-    "✅ Verification link generated"
-  );
+  console.log("🔗 Verification link generated");
+  console.log(verificationLink);
 
-  console.log(
-    verificationLink
-  );
+  // (IMPORTANT: YOU must email it via SMTP or service)
+  // Firebase DOES NOT send email automatically here
 
-  // ============================================
-  // 6. CREATE MONGODB USER
-  // ============================================
-  console.log(
-    "🗄️ Creating MongoDB officer..."
-  );
+  // 6. CREATE MONGO USER
+  console.log("🗄️ Creating MongoDB user...");
 
   await Officer.create({
     officerId: normalizedOfficerId,
@@ -242,30 +129,16 @@ router.post("/", async (req: Request, res: Response) => {
     createdAt: new Date(),
   });
 
-  console.log(
-    "✅ MongoDB officer created"
-  );
+  console.log("✅ MongoDB user created (pending)");
 
-  console.log(
-    "Status: pending"
-  );
-
-  // ============================================
-  // SUCCESS
-  // ============================================
-  console.log("\n========================================");
-  console.log("🎉 REGISTRATION SUCCESS");
-  console.log("Officer:", normalizedOfficerId);
-  console.log("Email:", normalizedEmail);
-  console.log("========================================\n");
+  // 7. RESPONSE
+  console.log("🎉 REGISTRATION COMPLETE");
 
   return res.status(201).json({
     success: true,
     code: "ACCOUNT_CREATED",
-    message:
-      "Account created successfully",
+    message: "Account created. Check your email to verify.",
   });
-
 });
 
 export default router;
