@@ -5,11 +5,11 @@
 
 import { Resend } from "resend";
 
+// ─── Error type ───────────────────────────────────────────────
+
 export class MailerError extends Error {
   constructor(
-    public readonly code:
-      | "MAILER_CONFIG_MISSING"
-      | "MAILER_SEND_FAILED",
+    public readonly code: "MAILER_CONFIG_MISSING" | "MAILER_SEND_FAILED",
     message: string,
     public readonly cause?: unknown
   ) {
@@ -27,9 +27,16 @@ if (!process.env.RESEND_API_KEY) {
   );
 }
 
+if (!process.env.EMAIL_FROM) {
+  throw new MailerError(
+    "MAILER_CONFIG_MISSING",
+    "Missing EMAIL_FROM"
+  );
+}
+
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-console.log("📡 [Resend] Ready");
+console.log("📡 [Resend] Initialized");
 
 // ─── Send Function ───────────────────────────────────────────────
 
@@ -40,23 +47,14 @@ interface MailOptions {
   html?: string;
 }
 
-export async function sendMail(
-  opts: MailOptions
-): Promise<void> {
-  const from = process.env.EMAIL_FROM;
-
-  if (!from) {
-    throw new MailerError(
-      "MAILER_CONFIG_MISSING",
-      "Missing EMAIL_FROM"
-    );
-  }
+export async function sendMail(opts: MailOptions): Promise<void> {
+  const from = process.env.EMAIL_FROM!;
 
   console.log("\n📨 [Resend] Sending email...");
   console.log("➡️ To:", opts.to);
 
   try {
-    const result = await resend.emails.send({
+    const { data, error } = await resend.emails.send({
       from,
       to: opts.to,
       subject: opts.subject,
@@ -64,11 +62,21 @@ export async function sendMail(
       html: opts.html,
     });
 
+    if (error) {
+      console.error("❌ [Resend] Error:", error);
+
+      throw new MailerError(
+        "MAILER_SEND_FAILED",
+        "Failed to send email",
+        error
+      );
+    }
+
     console.log("✅ [Resend] Email sent successfully");
-    console.log("📧 ID:", result.data?.id);
+    console.log("📧 ID:", data?.id);
 
   } catch (err) {
-    console.error("❌ [Resend] Failed:", err);
+    console.error("❌ [Resend] Exception:", err);
 
     throw new MailerError(
       "MAILER_SEND_FAILED",
