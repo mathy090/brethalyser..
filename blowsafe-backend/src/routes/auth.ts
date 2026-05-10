@@ -4,9 +4,12 @@
  * Authentication endpoints for BlowSafe.
  *
  * POST /api/auth/register  — Firebase-authed officer self-registration
- * POST /api/auth/login     — Firebase-authed officer login → JWT pair
+ * POST /api/auth/login     — Firebase-authed officer login → JWT (5 min)
  * POST /api/auth/refresh   — Refresh JWT using a refresh token
  * POST /api/auth/verify    — Validate a JWT (used by the mobile session guard)
+ *
+ * JWT lifetime: 5 minutes.
+ * If token is expired the client must call /refresh or re-login.
  */
 
 import { Router, type Response } from "express";
@@ -29,7 +32,8 @@ function signAccessToken(payload: {
   role: string;
   status: string;
 }): string {
-  return jwt.sign(payload, env.JWT_SECRET, { expiresIn: env.JWT_EXPIRES_IN });
+  // 5-minute JWT — client must re-login or refresh when expired
+  return jwt.sign(payload, env.JWT_SECRET, { expiresIn: "5m" });
 }
 
 function signRefreshToken(payload: {
@@ -58,7 +62,6 @@ router.post(
         email?: string;
       };
 
-      // Validate required fields up-front before any DB work.
       const missing: string[] = [];
       if (!officerId?.trim()) missing.push("officerId");
       if (!email?.trim()) missing.push("email");
@@ -67,32 +70,22 @@ router.post(
         return;
       }
 
-      // All three uniqueness checks in parallel to minimise round trips.
       const [emailDoc, idDoc, uidDoc] = await Promise.all([
         Officer.findOne({ email: email!.toLowerCase().trim() }),
         Officer.findOne({ officerId: officerId!.trim() }),
         Officer.findOne({ firebaseUid: req.uid }),
       ]);
 
-      if (emailDoc) {
-        Errors.emailTaken(res);
-        return;
-      }
-      if (idDoc) {
-        Errors.officerIdTaken(res);
-        return;
-      }
-      if (uidDoc) {
-        Errors.accountAlreadyExists(res);
-        return;
-      }
+      if (emailDoc) { Errors.emailTaken(res); return; }
+      if (idDoc)    { Errors.officerIdTaken(res); return; }
+      if (uidDoc)   { Errors.accountAlreadyExists(res); return; }
 
       await Officer.create({
         officerId: officerId!.trim(),
         email: email!.toLowerCase().trim(),
         firebaseUid: req.uid,
         role: "officer",
-        status: "approved", // New registrations default to approved
+        status: "approved",
       });
 
       res.status(201).json({ message: "Officer registered successfully." });
@@ -117,7 +110,7 @@ router.post(
         return;
       }
 
-      // Confirm the Firebase user has verified their email.
+      // Confirm email verification
       let firebaseUser: admin.auth.UserRecord;
       try {
         firebaseUser = await admin.auth().getUser(req.uid!);
@@ -131,17 +124,14 @@ router.post(
         return;
       }
 
-      // Look up or auto-create the MongoDB record.
       let officer = await Officer.findOne({ firebaseUid: req.uid });
 
       if (officer) {
-        // Existing account — make sure the submitted Officer ID matches.
         if (officer.officerId !== officerId.trim()) {
           Errors.officerIdMismatch(res);
           return;
         }
       } else {
-        // First login after registration — create MongoDB record now.
         officer = await Officer.create({
           officerId: officerId.trim(),
           email: firebaseUser.email?.toLowerCase().trim(),
@@ -151,14 +141,13 @@ router.post(
         });
       }
 
-      // ✅ FIX: Direct JSON response instead of undefined Errors.forbidden
       if (officer.status === "rejected") {
-        res.status(403).json({ message: "Account banned" });
+        res.status(403).json({ message: "Account banned", code: "ACCOUNT_BANNED" });
         return;
       }
 
       if (officer.status !== "approved") {
-        res.status(403).json({ message: "Account pending" });
+        res.status(403).json({ message: "Account pending", code: "ACCOUNT_PENDING" });
         return;
       }
 
@@ -169,7 +158,9 @@ router.post(
         status: officer.status,
       };
 
+      // Access token: 5 minutes
       const token = signAccessToken(tokenPayload);
+      // Refresh token: longer lived (env controlled)
       const refreshToken = signRefreshToken(tokenPayload);
 
       res.status(200).json({
@@ -179,6 +170,8 @@ router.post(
         status: officer.status,
         uid: req.uid,
         officerId: officer.officerId,
+        // Tell client exactly when token expires so it can prompt re-login
+        expiresIn: 300, // seconds
       });
     } catch (err) {
       Errors.internal(res, "POST /login", err);
@@ -219,23 +212,22 @@ router.post(
         return;
       }
 
-      // Always re-fetch from DB so the new token carries the latest role/status.
       const officer = await Officer.findOne({ firebaseUid: decoded.uid });
       if (!officer) {
         Errors.officerNotFound(res);
         return;
       }
 
-      // ✅ FIX: Direct JSON response instead of undefined Errors.forbidden
       if (officer.status === "rejected") {
-        res.status(403).json({ message: "Account banned" });
+        res.status(403).json({ message: "Account banned", code: "ACCOUNT_BANNED" });
         return;
       }
       if (officer.status !== "approved") {
-        res.status(403).json({ message: "Account pending" });
+        res.status(403).json({ message: "Account pending", code: "ACCOUNT_PENDING" });
         return;
       }
 
+      // Issue a fresh 5-minute access token
       const newToken = signAccessToken({
         uid: decoded.uid,
         officerId: officer.officerId,
@@ -248,6 +240,7 @@ router.post(
         role: officer.role,
         status: officer.status,
         officerId: officer.officerId,
+        expiresIn: 300,
       });
     } catch (err) {
       Errors.internal(res, "POST /refresh", err);

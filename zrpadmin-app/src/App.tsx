@@ -1,11 +1,11 @@
 import { Routes, Route } from 'react-router-dom'
 
-// Page imports
 import Welcome from './pages/Welcome'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
 import Dashboard from './pages/Dashboard'
 import ServerScreen from './pages/ServerScreen'
+import VpnBlockedScreen from './pages/VpnBlockedScreen'
 import ProtectedRoute from './components/ProtectedRoutes'
 
 function App() {
@@ -15,7 +15,8 @@ function App() {
       <Route path="/" element={<Welcome />} />
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
-      
+      <Route path="/vpn-blocked" element={<VpnBlockedScreen />} />
+
       {/* Protected routes */}
       <Route element={<ProtectedRoute />}>
         <Route path="/dashboard" element={<Dashboard />}>
@@ -25,7 +26,7 @@ function App() {
           <Route path="settings" element={<h2>⚙️ Settings</h2>} />
         </Route>
       </Route>
-      
+
       {/* 404 fallback */}
       <Route path="*" element={<h2>404 - Page Not Found</h2>} />
     </Routes>
