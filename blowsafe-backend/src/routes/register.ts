@@ -1,143 +1,192 @@
-import { Router, Request, Response } from "express";
-import { adminAuth } from "../config/firebase";
+/**
+ * src/routes/register.ts
+ *
+ * Officer self-registration.
+ *
+ * Flow:
+ *  1. Validate input
+ *  2. Check MongoDB for duplicate officerId
+ *  3. Check Firebase for duplicate email
+ *  4. Create Firebase user (Admin SDK)
+ *  5. Firebase sends verification email directly (via REST API — no mailer)
+ *  6. Create MongoDB officer record
+ *
+ * Why REST API for the email?
+ *  Admin SDK can generate a verification link but cannot send it.
+ *  The client SDK can send it but runs in the browser.
+ *  Solution: create a custom token → exchange for ID token → call
+ *  the Firebase sendOobCode endpoint, which triggers Firebase's own
+ *  email delivery to the user's address.
+ */
+
+import { Router, type Request, type Response } from "express";
+import axios from "axios";
+
+import admin from "../config/firebase";
 import { Officer } from "../models/Officer";
+import { env } from "../config/env";
 
 const router = Router();
 
-// ============================================
-// VALIDATION
-// ============================================
-const validateRegistration = (body: any) => {
-  const { officerId, email, password } = body;
+// ─── Validation ───────────────────────────────────────────────────────────────
 
-  if (!officerId || !/^[A-Z]\d{6}[A-Z]$|^\d{9}$/i.test(officerId)) {
-    return { code: "INVALID_OFFICER_ID", message: "Invalid Officer ID format" };
+function validate(body: Record<string, unknown>): { code: string; message: string } | null {
+  const { officerId, email, password } = body as Record<string, string>;
+
+  if (!officerId?.trim() || !/^[A-Z]\d{6}[A-Z]$|^\d{9}$/i.test(officerId.trim())) {
+    return { code: "INVALID_OFFICER_ID", message: "Invalid Officer ID format (e.g. A123456B)" };
   }
-
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+  if (!email?.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim())) {
     return { code: "INVALID_EMAIL", message: "Invalid email address" };
   }
-
   if (!password || password.length < 6) {
-    return { code: "WEAK_PASSWORD", message: "Password too short" };
+    return { code: "WEAK_PASSWORD", message: "Password must be at least 6 characters" };
   }
 
   return null;
-};
+}
 
-// ============================================
-// REGISTER
-// ============================================
+// ─── Firebase email verification via REST API ─────────────────────────────────
+// Firebase Admin SDK creates the user but cannot send emails on its own.
+// We obtain an ID token by exchanging a custom token, then call Firebase's
+// sendOobCode endpoint so Firebase delivers the verification email itself.
+
+async function sendFirebaseVerificationEmail(uid: string): Promise<void> {
+  const API_KEY = env.FIREBASE_WEB_API_KEY;
+
+  // Step 1: Create a short-lived custom token for this uid
+  const customToken = await admin.auth().createCustomToken(uid);
+
+  // Step 2: Exchange custom token → ID token (Firebase REST)
+  const { data: signInData } = await axios.post(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=${API_KEY}`,
+    { token: customToken, returnSecureToken: true },
+    { timeout: 8_000 }
+  );
+
+  const idToken: string = signInData.idToken;
+
+  // Step 3: Ask Firebase to send the verification email to the user
+  await axios.post(
+    `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${API_KEY}`,
+    { requestType: "VERIFY_EMAIL", idToken },
+    { timeout: 8_000 }
+  );
+}
+
+// ─── POST / ───────────────────────────────────────────────────────────────────
+
 router.post("/", async (req: Request, res: Response) => {
-  const { officerId, email, password } = req.body;
+  const { officerId, email, password } = req.body as Record<string, string>;
 
-  const normalizedOfficerId = officerId?.toUpperCase().trim();
-  const normalizedEmail = email?.toLowerCase().trim();
+  const normId    = officerId?.toUpperCase().trim();
+  const normEmail = email?.toLowerCase().trim();
 
-  console.log("\n========================================");
-  console.log("🚔 NEW REGISTRATION");
-  console.log("Officer ID:", normalizedOfficerId);
-  console.log("Email:", normalizedEmail);
-  console.log("========================================");
-
-  // 1. VALIDATION
-  const validationError = validateRegistration(req.body);
-  if (validationError) {
-    return res.status(400).json({
-      success: false,
-      code: validationError.code,
-      error: validationError.message,
-    });
+  // 1. Validate
+  const err = validate({ officerId: normId, email: normEmail, password });
+  if (err) {
+    return res.status(400).json({ success: false, code: err.code, error: err.message });
   }
 
-  // 2. CHECK OFFICER ID (MONGO ONLY)
-  console.log("🔍 Checking Officer ID...");
-
-  const existingOfficer = await Officer.findOne({
-    officerId: normalizedOfficerId,
-  });
-
-  if (existingOfficer) {
-    console.log("🚫 Officer ID already exists");
-
+  // 2. Check MongoDB — duplicate Officer ID
+  const existingById = await Officer.findOne({ officerId: normId });
+  if (existingById) {
     return res.status(409).json({
       success: false,
       code: "OFFICER_ID_IN_USE",
-      error: "Please use your official officer ID",
+      error: "Please use your official ZRP officer ID",
     });
   }
 
-  console.log("✅ Officer ID OK");
-
-  // 3. CHECK FIREBASE EMAIL
-  console.log("🔍 Checking Firebase email...");
-
+  // 3. Check Firebase — duplicate email
   try {
-    await adminAuth.getUserByEmail(normalizedEmail);
-
-    console.log("🚫 Email already exists in Firebase");
-
+    await admin.auth().getUserByEmail(normEmail);
     return res.status(409).json({
       success: false,
       code: "EMAIL_EXISTS",
-      error: "Account already exists",
+      error: "An account with this email already exists",
     });
-  } catch (err: any) {
-    if (err.code !== "auth/user-not-found") {
+  } catch (firebaseErr: any) {
+    if (firebaseErr.code !== "auth/user-not-found") {
+      console.error("[Register] Firebase email check failed:", firebaseErr.message);
       return res.status(500).json({
         success: false,
         code: "FIREBASE_CHECK_FAILED",
-        error: err.message,
+        error: "Unable to verify email availability",
       });
     }
+    // auth/user-not-found → email is available, continue
   }
 
-  console.log("✅ Email available");
+  // 4. Create Firebase user
+  let firebaseUser: admin.auth.UserRecord;
+  try {
+    firebaseUser = await admin.auth().createUser({
+      email: normEmail,
+      password,
+      emailVerified: false,
+    });
+  } catch (firebaseErr: any) {
+    if (firebaseErr.code === "auth/email-already-exists") {
+      return res.status(409).json({
+        success: false,
+        code: "EMAIL_EXISTS",
+        error: "An account with this email already exists",
+      });
+    }
+    console.error("[Register] Firebase createUser failed:", firebaseErr.message);
+    return res.status(500).json({
+      success: false,
+      code: "FIREBASE_CREATE_FAILED",
+      error: "Failed to create account",
+    });
+  }
 
-  // 4. CREATE FIREBASE USER
-  console.log("🔥 Creating Firebase user...");
+  // 5. Firebase sends verification email (no mailer needed)
+  try {
+    await sendFirebaseVerificationEmail(firebaseUser.uid);
+  } catch (emailErr: any) {
+    // Non-fatal: account exists, email just didn't send. Log and continue.
+    // User can request a new link from the login screen.
+    console.warn("[Register] Verification email failed (non-fatal):", emailErr.message);
+  }
 
-  const firebaseUser = await adminAuth.createUser({
-    email: normalizedEmail,
-    password,
-    emailVerified: false,
-  });
+  // 6. Create MongoDB record
+  try {
+    await Officer.create({
+      officerId:   normId,
+      email:       normEmail,
+      firebaseUid: firebaseUser.uid,
+      role:        "officer",
+      status:      "approved",
+      createdAt:   new Date(),
+    });
+  } catch (dbErr: any) {
+    // MongoDB failed — clean up the Firebase user so state stays consistent
+    await admin.auth().deleteUser(firebaseUser.uid).catch(() => {});
 
-  console.log("✅ Firebase user created:", firebaseUser.uid);
+    if (dbErr.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        code: "OFFICER_ID_IN_USE",
+        error: "Officer ID already registered",
+      });
+    }
 
-  // 5. SEND VERIFICATION LINK (ONLY TO THIS EMAIL)
-  console.log("📧 Sending verification link...");
+    console.error("[Register] MongoDB create failed:", dbErr.message);
+    return res.status(500).json({
+      success: false,
+      code: "DATABASE_ERROR",
+      error: "Failed to save officer record",
+    });
+  }
 
-  const verificationLink =
-    await adminAuth.generateEmailVerificationLink(normalizedEmail);
-
-  console.log("🔗 Verification link generated");
-  console.log(verificationLink);
-
-  // (IMPORTANT: YOU must email it via SMTP or service)
-  // Firebase DOES NOT send email automatically here
-
-  // 6. CREATE MONGO USER
-  console.log("🗄️ Creating MongoDB user...");
-
-  await Officer.create({
-    officerId: normalizedOfficerId,
-    email: normalizedEmail,
-    firebaseUid: firebaseUser.uid,
-    role: "officer",
-    status: "pending",
-    createdAt: new Date(),
-  });
-
-  console.log("✅ MongoDB user created (pending)");
-
-  // 7. RESPONSE
-  console.log("🎉 REGISTRATION COMPLETE");
+  console.log(`[Register] ✅ Officer registered: ${normId} (${normEmail})`);
 
   return res.status(201).json({
     success: true,
     code: "ACCOUNT_CREATED",
-    message: "Account created. Check your email to verify.",
+    message: "Account created. Check your email to verify before signing in.",
   });
 });
 
