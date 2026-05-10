@@ -1,147 +1,175 @@
 /**
  * src/routes/register.ts
+ *
+ * Registration flow (backend side):
+ *
+ * Step 1 — POST /api/auth/register/check
+ *   Validates Officer ID + email uniqueness in MongoDB.
+ *   Returns a short-lived signed token if the slot is free.
+ *   Frontend uses this token to confirm the backend approved the check.
+ *
+ * Step 2 — POST /api/auth/register/complete
+ *   Called by the frontend AFTER it has created the Firebase account
+ *   and sent the verification email via the Firebase Web SDK.
+ *   Verifies the check token, then creates the MongoDB officer record.
+ *
+ * Why this split?
+ *   - No Firebase Admin SDK calls needed for account creation.
+ *   - The Firebase Web SDK on the frontend handles createUserWithEmailAndPassword
+ *     and sendEmailVerification natively.
+ *   - The backend still owns the uniqueness gate and the DB record.
  */
 
-import { Router } from "express";
-import admin from "../config/firebase";
+import { Router, type Request, type Response } from "express";
+import jwt from "jsonwebtoken";
+
+import { env }     from "../config/env";
 import { Officer } from "../models/Officer";
-import { sendMail } from "../utils/mailer";
+import { Errors }  from "../utils/errors";
 
 const router = Router();
 
-// ─── Validation ───────────────────────────────────────────────
+// ─── Validation helpers ───────────────────────────────────────────────────────
 
-function validate(body: any) {
-  const { officerId, email, password } = body;
+const OFFICER_ID_RE = /^[A-Z]\d{6}[A-Z]$|^\d{9}$/i;
 
-  if (
-    !officerId ||
-    !/^[A-Z]\d{6}[A-Z]$|^\d{9}$/i.test(officerId)
-  ) {
-    return {
-      code: "INVALID_OFFICER_ID",
-      message: "Invalid Officer ID",
-    };
-  }
-
-  if (!email || !email.includes("@")) {
-    return {
-      code: "INVALID_EMAIL",
-      message: "Invalid email",
-    };
-  }
-
-  if (!password || password.length < 6) {
-    return {
-      code: "WEAK_PASSWORD",
-      message: "Weak password",
-    };
-  }
-
-  return null;
+function validateBody(officerId?: string, email?: string) {
+  const missing: string[] = [];
+  if (!officerId?.trim()) missing.push("officerId");
+  if (!email?.trim())     missing.push("email");
+  return missing;
 }
 
-// ─── Register ───────────────────────────────────────────────
+// ─── POST /api/auth/register/check ───────────────────────────────────────────
+//
+// Checks that the Officer ID and email are not already taken in MongoDB.
+// On success returns a short-lived JWT that the frontend must present in /complete.
 
-router.post("/", async (req, res) => {
-  const { officerId, email, password } = req.body;
+router.post(
+  "/check",
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { officerId, email } = req.body as {
+        officerId?: string;
+        email?:    string;
+      };
 
-  const normId = officerId?.toUpperCase().trim();
-  const normEmail = email?.toLowerCase().trim();
+      // 1. Presence validation
+      const missing = validateBody(officerId, email);
+      if (missing.length > 0) {
+        Errors.missingFields(res, missing);
+        return;
+      }
 
-  // 1. Validate
-  const err = validate(req.body);
+      const normId    = officerId!.trim().toUpperCase();
+      const normEmail = email!.trim().toLowerCase();
 
-  if (err) {
-    return res.status(400).json({
-      success: false,
-      ...err,
-    });
-  }
+      // 2. Format validation
+      if (!OFFICER_ID_RE.test(normId)) {
+        Errors.invalidField(
+          res,
+          "officerId",
+          "must be in format A123456B or 9 numeric digits"
+        );
+        return;
+      }
 
-  // 2. Check Officer ID
-  const exists = await Officer.findOne({ officerId: normId });
+      // 3. Uniqueness checks (parallel)
+      const [emailDoc, idDoc] = await Promise.all([
+        Officer.findOne({ email:     normEmail }),
+        Officer.findOne({ officerId: normId    }),
+      ]);
 
-  if (exists) {
-    return res.status(409).json({
-      success: false,
-      code: "OFFICER_ID_IN_USE",
-      error: "Officer ID already exists",
-    });
-  }
+      if (emailDoc) { Errors.emailTaken(res);     return; }
+      if (idDoc)    { Errors.officerIdTaken(res); return; }
 
-  // 3. Check Firebase email
-  try {
-    await admin.auth().getUserByEmail(normEmail);
+      // 4. Issue a short-lived check token (5 min)
+      //    The frontend presents this to /complete so we know the check passed.
+      const checkToken = jwt.sign(
+        { officerId: normId, email: normEmail, purpose: "register_check" },
+        env.JWT_SECRET,
+        { expiresIn: "5m" }
+      );
 
-    return res.status(409).json({
-      success: false,
-      code: "EMAIL_EXISTS",
-      error: "Email already exists",
-    });
-
-  } catch (e: any) {
-    if (e.code !== "auth/user-not-found") {
-      return res.status(500).json({
-        success: false,
-        code: "FIREBASE_ERROR",
+      res.status(200).json({
+        ok:         true,
+        checkToken,
+        message:    "Officer ID and email are available. Proceed with account creation.",
       });
+    } catch (err) {
+      Errors.internal(res, "POST /register/check", err);
     }
   }
+);
 
-  // 4. Create Firebase user
-  const user = await admin.auth().createUser({
-    email: normEmail,
-    password,
-    emailVerified: false,
-  });
+// ─── POST /api/auth/register/complete ────────────────────────────────────────
+//
+// Called after the Firebase Web SDK has created the user and sent the
+// verification email. We verify the check token, then save to MongoDB.
 
-  // 5. Generate verification link
-  const link = await admin
-    .auth()
-    .generateEmailVerificationLink(normEmail);
+router.post(
+  "/complete",
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { checkToken, firebaseUid } = req.body as {
+        checkToken?:  string;
+        firebaseUid?: string;
+      };
 
-  // 6. SEND EMAIL via Gmail API
-  await sendMail({
-    to: normEmail,
-    subject: "ZRP Account Verification",
-    text: `Verify your account:\n\n${link}`,
-    html: `
-      <div style="font-family:sans-serif;padding:20px;">
-        <h2>ZRP Account Verification</h2>
-        <p>Click below to verify your account:</p>
+      // 1. Basic presence
+      if (!checkToken?.trim()) {
+        Errors.noToken(res);
+        return;
+      }
+      if (!firebaseUid?.trim()) {
+        Errors.missingFields(res, ["firebaseUid"]);
+        return;
+      }
 
-        <a href="${link}"
-           style="
-             display:inline-block;
-             padding:12px 24px;
-             background:#2563eb;
-             color:white;
-             text-decoration:none;
-             border-radius:8px;
-             font-weight:bold;
-           ">
-          Verify Account
-        </a>
-      </div>
-    `,
-  });
+      // 2. Verify check token
+      let decoded: { officerId: string; email: string; purpose: string };
+      try {
+        decoded = jwt.verify(checkToken, env.JWT_SECRET) as typeof decoded;
+      } catch {
+        Errors.invalidToken(res);
+        return;
+      }
 
-  // 7. Save MongoDB user
-  await Officer.create({
-    officerId: normId,
-    email: normEmail,
-    firebaseUid: user.uid,
-    status: "pending",
-    createdAt: new Date(),
-  });
+      if (decoded.purpose !== "register_check") {
+        Errors.invalidToken(res);
+        return;
+      }
 
-  console.log("✅ Registered:", normId);
+      const { officerId, email } = decoded;
 
-  return res.status(201).json({
-    success: true,
-    message: "Account created. Check email to verify.",
-  });
-});
+      // 3. Guard against replay / race condition — check again
+      const [emailDoc, idDoc, uidDoc] = await Promise.all([
+        Officer.findOne({ email }),
+        Officer.findOne({ officerId }),
+        Officer.findOne({ firebaseUid }),
+      ]);
+
+      if (emailDoc)  { Errors.emailTaken(res);         return; }
+      if (idDoc)     { Errors.officerIdTaken(res);     return; }
+      if (uidDoc)    { Errors.accountAlreadyExists(res); return; }
+
+      // 4. Create MongoDB record (status pending — admin must approve)
+      await Officer.create({
+        officerId,
+        email,
+        firebaseUid,
+        role:   "officer",
+        status: "pending",
+      });
+
+      res.status(201).json({
+        ok:      true,
+        message: "Officer account created. Verify your email then wait for admin approval.",
+      });
+    } catch (err) {
+      Errors.internal(res, "POST /register/complete", err);
+    }
+  }
+);
 
 export default router;
