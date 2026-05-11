@@ -1,10 +1,11 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import { useNavigate, Link, useLocation } from 'react-router-dom';
 import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
 import axios, { type AxiosError } from 'axios';
 import { io, Socket } from 'socket.io-client';
 import { auth } from '../auth/firebaseConfig';
 import { useAuth } from '../context/AuthContext';
+import '../designs/Login.css'; // ✅ Import external CSS
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_BACKEND_URL,
@@ -18,13 +19,13 @@ const STRICT_ROLES = new Set(['admin', 'superadmin']);
 
 type BannerType = 'error' | 'warning' | 'success';
 
-const ERROR_MAP: Record<string, { type: BannerType; title: string; message: string; field?: string }> = {
+const ERROR_MAP: Record<string, { type: BannerType; title: string; message: string }> = {
   INVALID_CREDENTIAL:      { type: 'error',   title: 'Invalid Credentials',   message: 'Officer ID, email or password is incorrect.' },
   USER_NOT_FOUND:          { type: 'error',   title: 'Not Found',             message: 'No account found for this email address.' },
   TOO_MANY_REQUESTS:       { type: 'warning', title: 'Account Locked',        message: 'Too many attempts. Wait a few minutes.' },
-  ACCOUNT_PENDING:         { type: 'warning', title: 'Pending Approval',      message: 'Your account is awaiting administrator approval. You will be notified by email once approved.' },
+  ACCOUNT_PENDING:         { type: 'warning', title: 'Pending Approval',      message: 'Your account is awaiting administrator approval.' },
   ACCOUNT_REJECTED:        { type: 'error',   title: 'Access Denied',         message: 'Access has been denied. Contact your commanding officer.' },
-  EMAIL_NOT_VERIFIED:      { type: 'warning', title: 'Verify Email',          message: 'Check your inbox for the verification link sent at registration.' },
+  EMAIL_NOT_VERIFIED:      { type: 'warning', title: 'Verify Email',          message: 'Check your inbox for the verification link.' },
   COMMERCIAL_VPN_BLOCKED:  { type: 'error',   title: 'VPN Detected',          message: 'Disable your VPN and try again.' },
   NETWORK_ERROR:           { type: 'error',   title: 'Connection Error',      message: 'Cannot reach servers. Check your connection.' },
   SERVER_ERROR:            { type: 'error',   title: 'Server Error',          message: 'Unexpected server error. Try again shortly.' },
@@ -33,7 +34,7 @@ const ERROR_MAP: Record<string, { type: BannerType; title: string; message: stri
 export default function Login() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { login: ctxLogin, isAuthenticated } = useAuth();
+  const { login: ctxLogin } = useAuth();
 
   const [officerId, setOfficerId] = useState('');
   const [email, setEmail]         = useState('');
@@ -41,93 +42,18 @@ export default function Login() {
   const [errors, setErrors]       = useState<Record<string, string>>({});
   const [banner, setBanner]       = useState<{ type: BannerType; title: string; message: string } | null>(null);
   const [loading, setLoading]     = useState(false);
+  const [wsStep, setWsStep]       = useState<'idle' | 'connecting' | 'done'>('idle');
 
   const bannerRef = useRef<HTMLDivElement>(null);
   const wsSocketRef = useRef<Socket | null>(null);
-  const isNavigatingRef = useRef(false); // 🔐 FIX: Prevents race condition on successful login
 
-  // Already logged in → go to dashboard
-  useEffect(() => {
-    if (isAuthenticated) navigate('/dashboard', { replace: true });
-  }, [isAuthenticated, navigate]);
-
-  // Session-expired banner from redirect
-  useEffect(() => {
+  React.useEffect(() => {
     const state = location.state as { expired?: boolean } | null;
     if (state?.expired) {
       setBanner({ type: 'warning', title: 'Session Expired', message: 'Your session expired. Please sign in again.' });
       window.history.replaceState({}, '');
     }
   }, []);
-
-  // 🔐 WebSocket Setup (Admin/Superadmin Only)
-  function setupAdminWebSocket(token: string, officerId: string, role: string) {
-    if (!STRICT_ROLES.has(role)) return;
-    
-    // Clear existing socket if any
-    if (wsSocketRef.current) {
-      wsSocketRef.current.removeAllListeners();
-      wsSocketRef.current.disconnect();
-    }
-
-    const getWSUrl = () => {
-      const isProd = import.meta.env.PROD;
-      return isProd ? `wss://${window.location.hostname}` : (import.meta.env.VITE_WS_URL || `ws://localhost:${import.meta.env.VITE_BACKEND_PORT || 3000}`);
-    };
-
-    const socket = io(getWSUrl(), {
-      auth: { token },
-      transports: ['websocket'],
-      reconnection: false,
-      timeout: 10000,
-      extraHeaders: { Origin: window.location.origin },
-    });
-
-    wsSocketRef.current = socket;
-    let lastPong = Date.now();
-    let heartbeatCheck: ReturnType<typeof setInterval> | null = null;
-
-    // ✅ 1-Second Heartbeat Monitor (Client-Side)
-    heartbeatCheck = setInterval(() => {
-      if (Date.now() - lastPong > 2500) { // >2.5s without pong = connection dead
-        handleSessionBreak('heartbeat_timeout');
-      }
-    }, 1000);
-
-    const handleSessionBreak = (reason: string) => {
-      if (isNavigatingRef.current) return; // 🔐 FIX: Ignore if user just logged in successfully
-      if (heartbeatCheck) clearInterval(heartbeatCheck);
-      
-      console.warn(`⚠️ Admin WebSocket session broken: ${reason}`);
-      localStorage.clear();
-      sessionStorage.clear();
-      signOut(auth).catch(() => {});
-      navigate('/session-interrupted', { replace: true, state: { reason } });
-    };
-
-    socket.on('connect', () => {
-      console.log(`✅ Admin WebSocket connected | Officer: ${officerId}`);
-      lastPong = Date.now();
-    });
-
-    socket.on('ping', () => {
-      socket.emit('pong');
-      lastPong = Date.now(); // Reset timeout on every server ping
-    });
-
-    socket.on('disconnect', (reason) => {
-      if (heartbeatCheck) clearInterval(heartbeatCheck);
-      handleSessionBreak(`disconnect:${reason}`);
-    });
-
-    socket.on('connect_error', () => {
-      handleSessionBreak('connect_error');
-    });
-
-    socket.on('error', () => {
-      handleSessionBreak('socket_error');
-    });
-  }
 
   function validate(): boolean {
     const e: Record<string, string> = {};
@@ -138,12 +64,53 @@ export default function Login() {
     return Object.keys(e).length === 0;
   }
 
+  function initAdminWebSocket(token: string, officerId: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const wsUrl = import.meta.env.PROD 
+        ? `wss://${window.location.hostname}` 
+        : (import.meta.env.VITE_WS_URL || `ws://localhost:${import.meta.env.VITE_BACKEND_PORT || 3000}`);
+
+      console.log('🔌 Attempting WS connection to:', wsUrl);
+
+      const socket = io(wsUrl, {
+        auth: { token },
+        transports: ['websocket'],
+        reconnection: false,
+        timeout: 8000,
+      });
+
+      wsSocketRef.current = socket;
+
+      socket.on('connect', () => {
+        console.log('✅ WebSocket CONNECTED successfully');
+        resolve();
+      });
+
+      socket.on('connect_error', (err) => {
+        console.error('❌ WebSocket CONNECTION FAILED:', err.message);
+        reject(err);
+      });
+
+      socket.on('error', (err) => {
+        console.error('❌ WebSocket ERROR:', err.message);
+        reject(err);
+      });
+
+      socket.on('disconnect', (reason) => {
+        console.warn('⚠️ WebSocket DISCONNECTED during setup:', reason);
+        reject(new Error(`disconnect:${reason}`));
+      });
+    });
+  }
+
   async function handleSubmit() {
-    if (loading) return;
+    if (loading || wsStep !== 'idle') return;
     setBanner(null);
     if (!validate()) return;
 
     setLoading(true);
+    setWsStep('idle');
+
     try {
       const cred = await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
       const idToken = await cred.user.getIdToken();
@@ -154,7 +121,7 @@ export default function Login() {
         { headers: { Authorization: `Bearer ${idToken}` } }
       );
 
-      if (!data?.token) throw new Error('No token returned');
+      if (!data?.token) throw new Error('No token returned from backend');
 
       ctxLogin({
         token:     data.token,
@@ -164,36 +131,50 @@ export default function Login() {
         status:    data.status ?? 'approved',
       });
 
-      // 🔐 Role-based session
       if (STRICT_ROLES.has(data.role)) {
-        setupAdminWebSocket(data.token, data.officerId, data.role);
-      }
+        setWsStep('connecting');
+        setBanner({ type: 'warning', title: 'Establishing Secure Channel', message: 'Verifying persistent connection...' });
 
-      // 🔐 FIX: Mark navigating BEFORE route change to prevent race condition
-      isNavigatingRef.current = true;
-      navigate('/dashboard', { replace: true });
+        try {
+          await initAdminWebSocket(data.token, data.officerId);
+          setWsStep('done');
+          setBanner(null);
+          navigate('/dashboard', { replace: true });
+        } catch (err) {
+          console.error('🚨 WS Gatekeeper failed. Forcing logout.');
+          setWsStep('idle');
+          setBanner(null);
+          localStorage.clear();
+          sessionStorage.clear();
+          signOut(auth).catch(() => {});
+          navigate('/session-interrupted', { replace: true, state: { reason: 'websocket_setup_failed' } });
+        }
+      } else {
+        navigate('/dashboard', { replace: true });
+      }
 
     } catch (err: any) {
       await signOut(auth).catch(() => null);
+      setWsStep('idle');
 
       let code = 'SERVER_ERROR';
       if (err?.code?.startsWith('auth/')) {
         const map: Record<string, string> = {
-          'auth/invalid-credential':     'INVALID_CREDENTIAL',
-          'auth/wrong-password':         'INVALID_CREDENTIAL',
-          'auth/user-not-found':         'USER_NOT_FOUND',
-          'auth/too-many-requests':      'TOO_MANY_REQUESTS',
+          'auth/invalid-credential': 'INVALID_CREDENTIAL',
+          'auth/wrong-password': 'INVALID_CREDENTIAL',
+          'auth/user-not-found': 'USER_NOT_FOUND',
+          'auth/too-many-requests': 'TOO_MANY_REQUESTS',
           'auth/network-request-failed': 'NETWORK_ERROR',
         };
         code = map[err.code] ?? 'SERVER_ERROR';
       } else if ((err as AxiosError).isAxiosError) {
-        const ae = err as AxiosError<{ code?: string; message?: string }>;
+        const ae = err as AxiosError<{ code?: string }>;
         if (!ae.response) code = 'NETWORK_ERROR';
         else {
           const bc = ae.response.data?.code ?? '';
-          if (bc.includes('PENDING'))  code = 'ACCOUNT_PENDING';
+          if (bc.includes('PENDING')) code = 'ACCOUNT_PENDING';
           else if (bc.includes('REJECT') || bc.includes('BAN')) code = 'ACCOUNT_REJECTED';
-          else if (bc.includes('VPN'))  code = 'COMMERCIAL_VPN_BLOCKED';
+          else if (bc.includes('VPN')) code = 'COMMERCIAL_VPN_BLOCKED';
           else if (bc.includes('EMAIL_NOT_VERIFIED')) code = 'EMAIL_NOT_VERIFIED';
           else code = bc || 'SERVER_ERROR';
         }
@@ -203,69 +184,97 @@ export default function Login() {
       setBanner(resolved);
       setTimeout(() => bannerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 40);
     } finally {
-      setLoading(false);
+      if (wsStep === 'idle') setLoading(false);
     }
   }
 
+  const isDisabled = loading || wsStep !== 'idle';
+
   return (
-    <div style={styles.root}>
-      <div style={styles.card}>
-        <div style={styles.header}>
-          <div style={styles.badge}>ZRP</div>
+    <div className="login-root">
+      <div className="login-card">
+        <div className="login-header">
+          <div className="login-badge">ZRP</div>
           <div>
-            <h1 style={styles.title}>Officer Sign In</h1>
-            <p style={styles.subtitle}>Zimbabwe Republic Police · Traffic Enforcement</p>
+            <h1 className="login-title">Officer Sign In</h1>
+            <p className="login-subtitle">Zimbabwe Republic Police · Traffic Enforcement</p>
           </div>
         </div>
 
         <div ref={bannerRef}>
           {banner && (
-            <div style={{ ...styles.banner, ...bannerColors[banner.type] }}>
-              <div>
-                <p style={styles.bannerTitle}>{banner.title}</p>
-                <p style={styles.bannerMsg}>{banner.message}</p>
+            <div className={`login-banner ${banner.type}`}>
+              <div className="login-banner-content">
+                <p className="login-banner-title">{banner.title}</p>
+                <p className="login-banner-msg">{banner.message}</p>
               </div>
-              <button style={styles.bannerClose} onClick={() => setBanner(null)}>✕</button>
+              <button className="login-banner-close" onClick={() => setBanner(null)} aria-label="Dismiss">✕</button>
             </div>
           )}
         </div>
 
-        <div style={styles.fields}>
-          <Field label="Officer ID" id="officerId" value={officerId}
+        <div className="login-fields">
+          <Field 
+            label="Officer ID" 
+            id="officerId" 
+            value={officerId}
             onChange={v => { setOfficerId(v); setErrors(e => ({ ...e, officerId: '' })); }}
-            error={errors.officerId} placeholder="A123456B" hint="Format: A123456B or 9 digits"
-            autoComplete="username" disabled={loading} onEnter={handleSubmit} />
+            error={errors.officerId} 
+            placeholder="A123456B" 
+            hint="Format: A123456B or 9 digits"
+            autoComplete="username" 
+            disabled={isDisabled} 
+            onEnter={handleSubmit} 
+          />
 
-          <Field label="Email Address" id="email" type="email" value={email}
+          <Field 
+            label="Email Address" 
+            id="email" 
+            type="email" 
+            value={email}
             onChange={v => { setEmail(v); setErrors(e => ({ ...e, email: '' })); }}
-            error={errors.email} placeholder="officer@zrp.gov.zw"
-            autoComplete="email" disabled={loading} onEnter={handleSubmit} />
+            error={errors.email} 
+            placeholder="officer@zrp.gov.zw"
+            autoComplete="email" 
+            disabled={isDisabled} 
+            onEnter={handleSubmit} 
+          />
 
-          <Field label="Password" id="password" type="password" value={password}
+          <Field 
+            label="Password" 
+            id="password" 
+            type="password" 
+            value={password}
             onChange={v => { setPassword(v); setErrors(e => ({ ...e, password: '' })); }}
-            error={errors.password} placeholder="Enter your password"
-            autoComplete="current-password" disabled={loading} onEnter={handleSubmit} />
+            error={errors.password} 
+            placeholder="Enter your password"
+            autoComplete="current-password" 
+            disabled={isDisabled} 
+            onEnter={handleSubmit} 
+          />
         </div>
 
-        <button style={{ ...styles.btn, ...(loading ? styles.btnDisabled : {}) }}
-          onClick={handleSubmit} disabled={loading}>
-          {loading ? <><Spinner /> Signing In…</> : 'Sign In'}
+        <button 
+          className="login-btn" 
+          onClick={handleSubmit} 
+          disabled={isDisabled}
+        >
+          {wsStep === 'connecting'
+            ? <><span className="spinner" /> Securing Session…</>
+            : loading
+              ? <><span className="spinner" /> Signing In…</>
+              : 'Sign In'}
         </button>
 
-        <div style={styles.footer}>
-          <span style={styles.footerText}>No account? </span>
-          <Link to="/signup" style={styles.link}>Register</Link>
+        <div className="login-footer">
+          <span className="login-footer-text">No account? </span>
+          <Link to="/signup" className="login-link">Register</Link>
         </div>
 
-        <p style={styles.legal}>
+        <p className="login-legal">
           ⚠ Unauthorised access is a criminal offence under the Computer Crime and Cyber Crime Act [Chapter 9:23]. All access is logged.
         </p>
       </div>
-
-      <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
-        @keyframes fadeUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
-      `}</style>
     </div>
   );
 }
@@ -279,52 +288,25 @@ interface FieldProps {
 
 function Field({ label, id, type = 'text', value, onChange, error, placeholder, hint, autoComplete, disabled, onEnter }: FieldProps) {
   const [focused, setFocused] = useState(false);
-  const border = error ? '#FF4C4C' : focused ? '#1DB954' : '#222';
+  
   return (
-    <div style={{ marginBottom: 4 }}>
-      <label htmlFor={id} style={styles.label}>{label}</label>
-      <input id={id} type={type} value={value} placeholder={placeholder}
-        autoComplete={autoComplete} disabled={disabled}
+    <div className="field-group">
+      <label htmlFor={id} className="field-label">{label}</label>
+      <input 
+        id={id} 
+        type={type} 
+        value={value} 
+        placeholder={placeholder}
+        autoComplete={autoComplete} 
+        disabled={disabled}
         onChange={e => onChange(e.target.value)}
-        onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+        onFocus={() => setFocused(true)} 
+        onBlur={() => setFocused(false)}
         onKeyDown={e => e.key === 'Enter' && onEnter?.()}
-        style={{ ...styles.input, borderColor: border, boxShadow: focused ? `0 0 0 3px ${error ? 'rgba(255,76,76,.12)' : 'rgba(29,185,84,.12)'}` : 'none' }} />
-      {hint && !error && <p style={styles.hint}>{hint}</p>}
-      {error && <p style={styles.error}>{error}</p>}
+        className={`field-input ${error ? 'error' : ''}`}
+      />
+      {hint && !error && <p className="field-hint">{hint}</p>}
+      {error && <p className="field-error">{error}</p>}
     </div>
   );
 }
-
-function Spinner() {
-  return <span style={{ width: 16, height: 16, border: '2px solid rgba(0,0,0,.25)', borderTop: '2px solid #000', borderRadius: '50%', display: 'inline-block', animation: 'spin .7s linear infinite', marginRight: 8 }} />;
-}
-
-const bannerColors: Record<BannerType, React.CSSProperties> = {
-  error:   { background: 'rgba(255,76,76,.08)',  borderColor: '#FF4C4C' },
-  warning: { background: 'rgba(255,165,0,.08)',  borderColor: '#FFA500' },
-  success: { background: 'rgba(29,185,84,.08)',  borderColor: '#1DB954' },
-};
-
-const styles: Record<string, React.CSSProperties> = {
-  root: { minHeight: '100vh', background: '#080808', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '32px 16px', fontFamily: "'DM Mono', 'Courier New', monospace" },
-  card: { width: '100%', maxWidth: 440, background: '#0f0f0f', border: '1px solid #1a1a1a', borderRadius: 16, padding: '36px 32px', animation: 'fadeUp .35s ease-out' },
-  header: { display: 'flex', alignItems: 'center', gap: 14, marginBottom: 28 },
-  badge: { width: 44, height: 44, background: '#1DB954', borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#000', fontWeight: 800, fontSize: 13, letterSpacing: 1, flexShrink: 0 },
-  title: { margin: 0, fontSize: 20, fontWeight: 700, color: '#fff', letterSpacing: '-0.4px' },
-  subtitle: { margin: 0, fontSize: 11, color: '#444', marginTop: 2 },
-  banner: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', border: '1px solid', borderRadius: 10, padding: '12px 14px', marginBottom: 20 },
-  bannerTitle: { margin: '0 0 3px', fontSize: 12, fontWeight: 700, color: '#fff' },
-  bannerMsg: { margin: 0, fontSize: 12, color: '#aaa', lineHeight: 1.5 },
-  bannerClose: { background: 'none', border: 'none', color: '#555', cursor: 'pointer', fontSize: 14, padding: '0 0 0 8px', flexShrink: 0 },
-  fields: { display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 },
-  label: { display: 'block', marginBottom: 5, color: '#555', fontSize: 10, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase' },
-  input: { width: '100%', background: '#151515', color: '#fff', border: '1px solid #222', borderRadius: 8, padding: '12px 14px', fontSize: 14, outline: 'none', boxSizing: 'border-box', transition: 'border-color .15s, box-shadow .15s', fontFamily: 'inherit' },
-  hint: { margin: '4px 0 0 2px', color: '#444', fontSize: 11 },
-  error: { margin: '4px 0 0 2px', color: '#FF4C4C', fontSize: 11 },
-  btn: { width: '100%', background: '#1DB954', color: '#000', border: 'none', borderRadius: 10, padding: '13px', fontSize: 14, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', letterSpacing: '0.3px', transition: 'opacity .15s' },
-  btnDisabled: { opacity: 0.6, cursor: 'not-allowed' },
-  footer: { display: 'flex', justifyContent: 'center', gap: 6, marginTop: 18, fontSize: 13 },
-  footerText: { color: '#444' },
-  link: { color: '#1DB954', textDecoration: 'none', fontWeight: 600 },
-  legal: { marginTop: 24, color: '#2a2a2a', fontSize: 10, textAlign: 'center', lineHeight: 1.6 },
-};

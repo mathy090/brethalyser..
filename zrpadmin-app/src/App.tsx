@@ -1,5 +1,4 @@
-import { Routes, Route } from 'react-router-dom'
-
+import { Routes, Route, Navigate } from 'react-router-dom'
 import Welcome from './pages/Welcome'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
@@ -10,6 +9,7 @@ import SessionInterruptedScreen from './pages/SessionInterruptedScreen'
 import ProtectedRoute from './components/ProtectedRoutes'
 
 function App() {
+  // ✅ NO useEffect auto-redirects here. Login handles ALL navigation.
   return (
     <Routes>
       {/* Public routes */}
@@ -17,8 +17,6 @@ function App() {
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
       <Route path="/vpn-blocked" element={<VpnBlockedScreen />} />
-      
-      {/* Session interrupt screen */}
       <Route path="/session-interrupted" element={<SessionInterruptedScreen />} />
 
       {/* Protected routes */}
@@ -31,8 +29,8 @@ function App() {
         </Route>
       </Route>
 
-      {/* 404 fallback */}
-      <Route path="*" element={<h2>404 - Page Not Found</h2>} />
+      {/* Fallback */}
+      <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>
   )
 }
