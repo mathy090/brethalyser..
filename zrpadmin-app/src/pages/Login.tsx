@@ -2,9 +2,9 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate, Link, useLocation } from 'react-router-dom';
 import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
 import axios, { type AxiosError } from 'axios';
+import { io, Socket } from 'socket.io-client';
 import { auth } from '../auth/firebaseConfig';
 import { useAuth } from '../context/AuthContext';
-import { io, Socket } from 'socket.io-client';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_BACKEND_URL,
@@ -14,9 +14,9 @@ const api = axios.create({
 
 const OFFICER_ID_RE = /^[A-Z]\d{6}[A-Z]$|^\d{9}$/i;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const STRICT_ROLES = new Set(['admin', 'superadmin']);
 
 type BannerType = 'error' | 'warning' | 'success';
-const STRICT_ROLES = new Set(['admin', 'superadmin']);
 
 const ERROR_MAP: Record<string, { type: BannerType; title: string; message: string; field?: string }> = {
   INVALID_CREDENTIAL:      { type: 'error',   title: 'Invalid Credentials',   message: 'Officer ID, email or password is incorrect.' },
@@ -44,6 +44,7 @@ export default function Login() {
 
   const bannerRef = useRef<HTMLDivElement>(null);
   const wsSocketRef = useRef<Socket | null>(null);
+  const isNavigatingRef = useRef(false); // 🔐 FIX: Prevents race condition on successful login
 
   // Already logged in → go to dashboard
   useEffect(() => {
@@ -59,15 +60,74 @@ export default function Login() {
     }
   }, []);
 
-  // Cleanup WebSocket on unmount
-  useEffect(() => {
-    return () => {
-      if (wsSocketRef.current) {
-        wsSocketRef.current.disconnect();
-        wsSocketRef.current = null;
-      }
+  // 🔐 WebSocket Setup (Admin/Superadmin Only)
+  function setupAdminWebSocket(token: string, officerId: string, role: string) {
+    if (!STRICT_ROLES.has(role)) return;
+    
+    // Clear existing socket if any
+    if (wsSocketRef.current) {
+      wsSocketRef.current.removeAllListeners();
+      wsSocketRef.current.disconnect();
+    }
+
+    const getWSUrl = () => {
+      const isProd = import.meta.env.PROD;
+      return isProd ? `wss://${window.location.hostname}` : (import.meta.env.VITE_WS_URL || `ws://localhost:${import.meta.env.VITE_BACKEND_PORT || 3000}`);
     };
-  }, []);
+
+    const socket = io(getWSUrl(), {
+      auth: { token },
+      transports: ['websocket'],
+      reconnection: false,
+      timeout: 10000,
+      extraHeaders: { Origin: window.location.origin },
+    });
+
+    wsSocketRef.current = socket;
+    let lastPong = Date.now();
+    let heartbeatCheck: ReturnType<typeof setInterval> | null = null;
+
+    // ✅ 1-Second Heartbeat Monitor (Client-Side)
+    heartbeatCheck = setInterval(() => {
+      if (Date.now() - lastPong > 2500) { // >2.5s without pong = connection dead
+        handleSessionBreak('heartbeat_timeout');
+      }
+    }, 1000);
+
+    const handleSessionBreak = (reason: string) => {
+      if (isNavigatingRef.current) return; // 🔐 FIX: Ignore if user just logged in successfully
+      if (heartbeatCheck) clearInterval(heartbeatCheck);
+      
+      console.warn(`⚠️ Admin WebSocket session broken: ${reason}`);
+      localStorage.clear();
+      sessionStorage.clear();
+      signOut(auth).catch(() => {});
+      navigate('/session-interrupted', { replace: true, state: { reason } });
+    };
+
+    socket.on('connect', () => {
+      console.log(`✅ Admin WebSocket connected | Officer: ${officerId}`);
+      lastPong = Date.now();
+    });
+
+    socket.on('ping', () => {
+      socket.emit('pong');
+      lastPong = Date.now(); // Reset timeout on every server ping
+    });
+
+    socket.on('disconnect', (reason) => {
+      if (heartbeatCheck) clearInterval(heartbeatCheck);
+      handleSessionBreak(`disconnect:${reason}`);
+    });
+
+    socket.on('connect_error', () => {
+      handleSessionBreak('connect_error');
+    });
+
+    socket.on('error', () => {
+      handleSessionBreak('socket_error');
+    });
+  }
 
   function validate(): boolean {
     const e: Record<string, string> = {};
@@ -78,54 +138,6 @@ export default function Login() {
     return Object.keys(e).length === 0;
   }
 
-  // 🔐 Establish WebSocket session for admins/superadmins (session persistence ONLY)
-  function setupAdminWebSocket(token: string, officerId: string, role: string) {
-    if (!STRICT_ROLES.has(role)) return; // Only admins/superadmins get WebSocket session
-
-    const getWSUrl = () => {
-      const isProd = import.meta.env.PROD;
-      return isProd ? `wss://${window.location.hostname}` : (import.meta.env.VITE_WS_URL || `ws://localhost:${import.meta.env.VITE_BACKEND_PORT || 3000}`);
-    };
-
-    const socket = io(getWSUrl(), {
-      auth: { token }, // JWT for auth handshake only
-      transports: ['websocket'],
-      reconnection: false, // Force explicit re-login on disconnect
-      timeout: 10000,
-      extraHeaders: { Origin: window.location.origin },
-    });
-
-    wsSocketRef.current = socket;
-
-    const handleSessionBreak = (reason: string) => {
-      console.warn(`⚠️ Admin WebSocket session broken: ${reason}`);
-      // 🔥 INSTANT LOGOUT: Clear ALL auth state
-      localStorage.clear();
-      sessionStorage.clear();
-      signOut(auth).catch(() => {});
-      // Redirect to interrupt screen
-      navigate('/session-interrupted', { replace: true, state: { reason } });
-    };
-
-    socket.on('connect', () => {
-      console.log(`✅ Admin WebSocket connected | Officer: ${officerId}`);
-    });
-
-    socket.on('disconnect', (reason) => {
-      handleSessionBreak(`disconnect:${reason}`);
-    });
-
-    socket.on('connect_error', (err) => {
-      console.error('❌ WebSocket connect error:', err.message);
-      handleSessionBreak('connect_error');
-    });
-
-    socket.on('error', (err) => {
-      console.error('❌ WebSocket error:', err.message);
-      handleSessionBreak('error');
-    });
-  }
-
   async function handleSubmit() {
     if (loading) return;
     setBanner(null);
@@ -133,11 +145,9 @@ export default function Login() {
 
     setLoading(true);
     try {
-      // 🔹 Step 1: Firebase credential verification
       const cred = await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
       const idToken = await cred.user.getIdToken();
 
-      // 🔹 Step 2: Backend verification + JWT issuance (for API Authorization headers)
       const { data } = await api.post(
         '/api/auth/login',
         { officerId: officerId.trim().toUpperCase() },
@@ -146,21 +156,21 @@ export default function Login() {
 
       if (!data?.token) throw new Error('No token returned');
 
-      // 🔹 Step 3: Store JWT in context for API calls (Authorization header)
       ctxLogin({
-        token:     data.token,        // ✅ Used for API Authorization headers
+        token:     data.token,
         officerId: data.officerId ?? officerId.trim().toUpperCase(),
         uid:       cred.user.uid,
         role:      data.role   ?? 'officer',
         status:    data.status ?? 'approved',
       });
 
-      // 🔹 Step 4: For admins/superadmins → establish WebSocket session (session persistence ONLY)
-      // If WebSocket disconnects → instant logout regardless of JWT validity
+      // 🔐 Role-based session
       if (STRICT_ROLES.has(data.role)) {
         setupAdminWebSocket(data.token, data.officerId, data.role);
       }
 
+      // 🔐 FIX: Mark navigating BEFORE route change to prevent race condition
+      isNavigatingRef.current = true;
       navigate('/dashboard', { replace: true });
 
     } catch (err: any) {
@@ -200,7 +210,6 @@ export default function Login() {
   return (
     <div style={styles.root}>
       <div style={styles.card}>
-        {/* Header */}
         <div style={styles.header}>
           <div style={styles.badge}>ZRP</div>
           <div>
@@ -209,7 +218,6 @@ export default function Login() {
           </div>
         </div>
 
-        {/* Banner */}
         <div ref={bannerRef}>
           {banner && (
             <div style={{ ...styles.banner, ...bannerColors[banner.type] }}>
@@ -222,7 +230,6 @@ export default function Login() {
           )}
         </div>
 
-        {/* Fields */}
         <div style={styles.fields}>
           <Field label="Officer ID" id="officerId" value={officerId}
             onChange={v => { setOfficerId(v); setErrors(e => ({ ...e, officerId: '' })); }}
@@ -242,9 +249,7 @@ export default function Login() {
 
         <button style={{ ...styles.btn, ...(loading ? styles.btnDisabled : {}) }}
           onClick={handleSubmit} disabled={loading}>
-          {loading
-            ? <><Spinner /> Signing In…</>
-            : 'Sign In'}
+          {loading ? <><Spinner /> Signing In…</> : 'Sign In'}
         </button>
 
         <div style={styles.footer}>

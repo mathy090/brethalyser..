@@ -1,6 +1,10 @@
 /**
  * blowsafe-backend/src/index.ts
- * BlowSafe API server entry point (ADVANCED LOGGING + LOGIN ROUTE + WEBSOCKET)
+ * BlowSafe API server entry point
+ * 
+ * Session Strategy:
+ * • Officers: Standard JWT + rate limiting (HTTP)
+ * • Admins/Superadmins: WebSocket-only session persistence (1s heartbeat, instant logout)
  */
 
 import express from "express";
@@ -28,26 +32,22 @@ const app = express();
 const httpServer = createServer(app);
 
 // ─────────────────────────────────────────────
-// BOOT LOG
+// BOOT LOG + DYNAMIC URL DETECTION (Render-ready)
 // ─────────────────────────────────────────────
 console.log("\n========================================");
 console.log("🚀 BOOTING BLOWSAFE BACKEND");
 console.log("🌍 Environment:", env.NODE_ENV);
 console.log("🌐 Internal Port:", env.PORT);
 
-// ✅ Dynamic public URL detection (Render-friendly)
 const getPublicUrls = () => {
   const renderUrl = process.env.RENDER_EXTERNAL_URL;
-  const hostname = process.env.HOSTNAME || "0.0.0.0";
   const isRender = !!renderUrl;
-  
   return {
-    http: isRender ? `https://${renderUrl}` : `http://${hostname}:${env.PORT}`,
-    ws: isRender ? `wss://${renderUrl}` : `ws://${hostname}:${env.PORT}`,
-    display: isRender ? renderUrl : `${hostname}:${env.PORT}`,
+    http: isRender ? `https://${renderUrl}` : `http://0.0.0.0:${env.PORT}`,
+    ws: isRender ? `wss://${renderUrl}` : `ws://0.0.0.0:${env.PORT}`,
+    display: isRender ? renderUrl : `0.0.0.0:${env.PORT}`,
   };
 };
-
 const urls = getPublicUrls();
 console.log("🌐 Public URL:", urls.http);
 console.log("🔌 Public WS:", urls.ws);
@@ -57,26 +57,18 @@ console.log("========================================\n");
 // ─────────────────────────────────────────────
 // SECURITY
 // ─────────────────────────────────────────────
-app.set("trust proxy", true); // ✅ Critical for Render proxy headers
+app.set("trust proxy", true); // ✅ Required for Render proxy headers
 app.disable("x-powered-by");
 
 console.log("🛡️ Loading security middleware...");
-
-app.use(
-  helmet({
-    crossOriginResourcePolicy: false,
-  })
-);
-
+app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(compression());
-
 console.log("✅ Security middleware loaded");
 
 // ─────────────────────────────────────────────
 // CORS (Render-friendly dynamic origin)
 // ─────────────────────────────────────────────
 console.log("🌍 Configuring CORS...");
-
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -92,7 +84,6 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
-
 console.log("✅ CORS ready");
 
 // ─────────────────────────────────────────────
@@ -153,15 +144,26 @@ app.use(blockCommercialVPN);
 console.log("✅ VPN blocker active");
 
 // ─────────────────────────────────────────────
-// RATE LIMITER (BUN-COMPATIBLE)
+// RATE LIMITER (BUN-COMPATIBLE + IPv6-SAFE)
 // ─────────────────────────────────────────────
 console.log("🚦 Configuring rate limiter...");
+
+const safeKeyGenerator = (req: express.Request): string => {
+  return (
+    req.headers["cf-connecting-ip"]?.toString() ||
+    req.headers["x-forwarded-for"]?.toString().split(",")[0].trim() ||
+    req.ip ||
+    "unknown"
+  );
+};
 
 const publicLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: true,
+  keyGenerator: safeKeyGenerator,
   handler: (req, res) => {
     console.log("🚫 RATE LIMIT EXCEEDED | IP:", req.ip);
     return res.status(429).json({ success: false, code: "RATE_LIMITED", error: "Too many requests" });
@@ -173,6 +175,8 @@ const loginLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  trustProxy: true,
+  keyGenerator: safeKeyGenerator,
   handler: (req, res) => {
     console.log("🔐 LOGIN RATE LIMIT | IP:", req.ip);
     return res.status(429).json({ success: false, code: "LOGIN_RATE_LIMITED", message: "Too many login attempts. Try again in 15 minutes." });
@@ -259,7 +263,7 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 });
 
 // ─────────────────────────────────────────────
-// WEBSOCKET SETUP (Admin/Superadmin Only)
+// WEBSOCKET SETUP (Admin/Superadmin ONLY)
 // ─────────────────────────────────────────────
 const STRICT_ROLES = new Set(["admin", "superadmin"]);
 
@@ -278,9 +282,13 @@ function initWebSocket(server: ReturnType<typeof createServer>) {
         issuer: "blowsafe-backend",
         audience: "blowsafe-frontend",
       }) as JwtPayload & { role: string; officerId: string; uid: string };
+      
+      // ✅ ONLY allow admin/superadmin to connect via WebSocket
       if (!STRICT_ROLES.has(decoded.role)) {
+        console.warn(`🚫 WS Rejected: Officer ${decoded.officerId} has role "${decoded.role}"`);
         return next(new Error("Insufficient privileges for WebSocket session"));
       }
+      
       (socket as any).user = decoded;
       next();
     } catch (err) {
@@ -297,31 +305,65 @@ function initWebSocket(server: ReturnType<typeof createServer>) {
     console.log(`   Officer: ${user.officerId}`);
     console.log(`   Role   : ${user.role}`);
     console.log(`   IP     : ${socket.handshake.address}`);
-    console.log(`   UA     : ${socket.handshake.headers["user-agent"]?.slice(0, 60)}`);
+    console.log(`   UA     : ${socket.handshake.headers["user-agent"]?.slice(0, 60) || "unknown"}`);
     console.log(`========================================\n`);
 
-    // Send welcome + start heartbeat
+    // Send welcome
     socket.emit("connected", { message: "Secure session established", timestamp: Date.now() });
 
-    // ✅ CLEAR DISCONNECT LOG
-    socket.on("disconnect", (reason) => {
+    // ✅ 1-SECOND HEARTBEAT (Server → Client)
+    let heartbeatTimer: NodeJS.Timeout | null = null;
+    let disconnectLogged = false;
+
+    const startHeartbeat = () => {
+      heartbeatTimer = setInterval(() => {
+        socket.emit("ping"); // Server pings every 1000ms
+      }, 1000);
+    };
+
+    const stopHeartbeat = () => {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+    };
+
+    // ✅ GUARANTEED DISCONNECT LOG (prevents race conditions)
+    const logDisconnect = (reason: string) => {
+      if (disconnectLogged) return; // Prevent duplicate logs
+      disconnectLogged = true;
+      stopHeartbeat();
+      
       const ts = new Date().toISOString();
       console.log(`\n🔌 [${ts}] WS DISCONNECTED`);
       console.log(`   Officer: ${user.officerId}`);
       console.log(`   Role   : ${user.role}`);
       console.log(`   Reason : ${reason}`);
       console.log(`========================================\n`);
+    };
+
+    // Client responds to ping → connection alive
+    socket.on("pong", () => {
+      // Heartbeat acknowledged
     });
 
-    // ✅ CLEAR ERROR LOG
-    socket.on("error", (err) => {
-      const ts = new Date().toISOString();
-      console.error(`\n⚠️ [${ts}] WS ERROR`);
-      console.error(`   Officer: ${user.officerId}`);
-      console.error(`   Role   : ${user.role}`);
-      console.error(`   Error  : ${err.message}`);
-      console.log(`========================================\n`);
+    // ✅ Handle disconnect with guaranteed logging
+    socket.on("disconnect", (reason) => {
+      logDisconnect(reason);
     });
+
+    // ✅ Handle errors with guaranteed logging
+    socket.on("error", (err) => {
+      logDisconnect(`error:${err.message}`);
+    });
+
+    // ✅ Handle transport close (extra safety)
+    socket.on("close", () => {
+      logDisconnect("transport_close");
+    });
+
+    // Start heartbeat after connection is fully established
+    startHeartbeat();
   });
 
   console.log("✅ WebSocket server ready");
@@ -363,6 +405,9 @@ async function startServer() {
   }
 }
 
+// ─────────────────────────────────────────────
+// PROCESS ERROR HANDLERS
+// ─────────────────────────────────────────────
 process.on("uncaughtException", (err) => {
   console.log("\n========================================");
   console.log("❌ UNCAUGHT EXCEPTION");
