@@ -1,14 +1,18 @@
 /**
  * blowsafe-backend/src/auth/login.ts
  * 
- * Production login: Firebase Auth + Mongoose Read-Only Status Check
+ * Production login: Firebase Auth + MongoDB Read-Only Status Check
+ * 
+ * Session Strategy:
+ * • Officers: JWT-only session (HTTP Authorization header)
+ * • Admins/Superadmins: JWT for API + WebSocket for session persistence
  * 
  * Flow:
  * 1. Verify Firebase ID token (proves password is correct)
- * 2. READ officer from MongoDB via Mongoose (ZERO writes)
+ * 2. READ officer from MongoDB (ZERO writes)
  * 3. Validate email match + account status == "approved"
  * 4. Issue short-lived BlowSafe JWT with user metadata
- * 5. Log audit event (fire-and-forget, non-blocking)
+ * 5. Log audit event with role differentiation (fire-and-forget)
  * 
  * ⚠️ NO MongoDB writes. NO updates. NO inserts. Pure read-only validation.
  */
@@ -18,7 +22,7 @@ import admin from "firebase-admin";
 import jwt from "jsonwebtoken";
 
 import { env } from "../config/env";
-import { getDb } from "../config/mongo"; // ✅ Now exported
+import { getDb } from "../config/mongo";
 import { logAudit } from "../utils/auditLogger";
 
 const router = Router();
@@ -43,6 +47,8 @@ interface LoginSuccessResponse {
   officerId: string;
   role: OfficerDocument["role"];
   status: OfficerDocument["status"];
+  // 🔐 Frontend uses this to decide session persistence method
+  sessionType: "http" | "websocket";
 }
 
 interface LoginErrorResponse {
@@ -54,6 +60,7 @@ interface LoginErrorResponse {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const normalizeOfficerId = (id: string): string => id.trim().toUpperCase();
+const STRICT_ROLES = new Set(["admin", "superadmin"]);
 
 // ─── POST /api/auth/login ────────────────────────────────────────────────────
 
@@ -169,8 +176,8 @@ router.post("/", async (req: Request, res: Response) => {
 
     const officerId = normalizeOfficerId(rawOfficerId);
 
-    // ── 4. READ officer from MongoDB via Mongoose (ZERO writes) ──────────────
-    const db = getDb(); // ✅ Native MongoDB Db from Mongoose
+    // ── 4. READ officer from MongoDB (ZERO writes) ───────────────────────────
+    const db = getDb();
     const officersCollection = db.collection<OfficerDocument>("officers");
 
     // ✅ READ-ONLY: findOne, no updates, no inserts
@@ -257,7 +264,12 @@ router.post("/", async (req: Request, res: Response) => {
       audience: "blowsafe-frontend",
     });
 
-    // ── 8. Prepare success response ──────────────────────────────────────────
+    // ── 8. Determine session type based on role ──────────────────────────────
+    // • Officers: HTTP-only session (JWT in Authorization header)
+    // • Admins/Superadmins: WebSocket session persistence (JWT for API auth only)
+    const sessionType = STRICT_ROLES.has(officer.role) ? "websocket" : "http";
+
+    // ── 9. Prepare success response ──────────────────────────────────────────
     const successResponse: LoginSuccessResponse = {
       token: blowSafeToken,
       uid: firebaseUid,
@@ -265,9 +277,10 @@ router.post("/", async (req: Request, res: Response) => {
       officerId: officer.officerId,
       role: officer.role,
       status: officer.status,
+      sessionType, // 🔐 Frontend uses this to decide WebSocket vs HTTP-only
     };
 
-    // ── 9. Log successful login (fire-and-forget, non-blocking) ──────────────
+    // ── 10. Log successful login with role differentiation ───────────────────
     logAudit({
       event: "login_success",
       requestId,
@@ -275,10 +288,16 @@ router.post("/", async (req: Request, res: Response) => {
       officerId: officer.officerId,
       firebaseUid,
       role: officer.role,
+      sessionType, // 🔐 Audit trail includes session method
       duration: Date.now() - startTime,
     }).catch(() => {});
 
-    // ── 10. Return response ──────────────────────────────────────────────────
+    // 🔐 Log admin/superadmin logins separately for security monitoring
+    if (STRICT_ROLES.has(officer.role)) {
+      console.log(`🔐 [${new Date().toISOString()}] ADMIN LOGIN | Officer: ${officerId} | IP: ${clientIp} | Session: WebSocket`);
+    }
+
+    // ── 11. Return response ──────────────────────────────────────────────────
     return res.status(200).json(successResponse);
 
   } catch (error: any) {

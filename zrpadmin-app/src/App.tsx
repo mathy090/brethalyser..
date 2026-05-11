@@ -8,12 +8,8 @@ import ServerScreen from './pages/ServerScreen'
 import VpnBlockedScreen from './pages/VpnBlockedScreen'
 import SessionInterruptedScreen from './pages/SessionInterruptedScreen'
 import ProtectedRoute from './components/ProtectedRoutes'
-import { useAdminWebSocket } from './hooks/useAdminWebSocket'
 
 function App() {
-  // 👈 Activate WebSocket session control for admin/superadmin
-  useAdminWebSocket()
-
   return (
     <Routes>
       {/* Public routes */}
@@ -22,7 +18,7 @@ function App() {
       <Route path="/signup" element={<Signup />} />
       <Route path="/vpn-blocked" element={<VpnBlockedScreen />} />
       
-      {/* 👈 NEW: Session interrupt screen */}
+      {/* Session interrupt screen */}
       <Route path="/session-interrupted" element={<SessionInterruptedScreen />} />
 
       {/* Protected routes */}

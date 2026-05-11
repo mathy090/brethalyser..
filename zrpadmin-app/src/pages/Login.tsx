@@ -4,6 +4,7 @@ import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
 import axios, { type AxiosError } from 'axios';
 import { auth } from '../auth/firebaseConfig';
 import { useAuth } from '../context/AuthContext';
+import { io, Socket } from 'socket.io-client';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_BACKEND_URL,
@@ -15,6 +16,7 @@ const OFFICER_ID_RE = /^[A-Z]\d{6}[A-Z]$|^\d{9}$/i;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 type BannerType = 'error' | 'warning' | 'success';
+const STRICT_ROLES = new Set(['admin', 'superadmin']);
 
 const ERROR_MAP: Record<string, { type: BannerType; title: string; message: string; field?: string }> = {
   INVALID_CREDENTIAL:      { type: 'error',   title: 'Invalid Credentials',   message: 'Officer ID, email or password is incorrect.' },
@@ -41,6 +43,7 @@ export default function Login() {
   const [loading, setLoading]     = useState(false);
 
   const bannerRef = useRef<HTMLDivElement>(null);
+  const wsSocketRef = useRef<Socket | null>(null);
 
   // Already logged in → go to dashboard
   useEffect(() => {
@@ -56,6 +59,16 @@ export default function Login() {
     }
   }, []);
 
+  // Cleanup WebSocket on unmount
+  useEffect(() => {
+    return () => {
+      if (wsSocketRef.current) {
+        wsSocketRef.current.disconnect();
+        wsSocketRef.current = null;
+      }
+    };
+  }, []);
+
   function validate(): boolean {
     const e: Record<string, string> = {};
     if (!OFFICER_ID_RE.test(officerId.trim())) e.officerId = 'Invalid format — expected A123456B or 9 digits';
@@ -65,6 +78,54 @@ export default function Login() {
     return Object.keys(e).length === 0;
   }
 
+  // 🔐 Establish WebSocket session for admins/superadmins (session persistence ONLY)
+  function setupAdminWebSocket(token: string, officerId: string, role: string) {
+    if (!STRICT_ROLES.has(role)) return; // Only admins/superadmins get WebSocket session
+
+    const getWSUrl = () => {
+      const isProd = import.meta.env.PROD;
+      return isProd ? `wss://${window.location.hostname}` : (import.meta.env.VITE_WS_URL || `ws://localhost:${import.meta.env.VITE_BACKEND_PORT || 3000}`);
+    };
+
+    const socket = io(getWSUrl(), {
+      auth: { token }, // JWT for auth handshake only
+      transports: ['websocket'],
+      reconnection: false, // Force explicit re-login on disconnect
+      timeout: 10000,
+      extraHeaders: { Origin: window.location.origin },
+    });
+
+    wsSocketRef.current = socket;
+
+    const handleSessionBreak = (reason: string) => {
+      console.warn(`⚠️ Admin WebSocket session broken: ${reason}`);
+      // 🔥 INSTANT LOGOUT: Clear ALL auth state
+      localStorage.clear();
+      sessionStorage.clear();
+      signOut(auth).catch(() => {});
+      // Redirect to interrupt screen
+      navigate('/session-interrupted', { replace: true, state: { reason } });
+    };
+
+    socket.on('connect', () => {
+      console.log(`✅ Admin WebSocket connected | Officer: ${officerId}`);
+    });
+
+    socket.on('disconnect', (reason) => {
+      handleSessionBreak(`disconnect:${reason}`);
+    });
+
+    socket.on('connect_error', (err) => {
+      console.error('❌ WebSocket connect error:', err.message);
+      handleSessionBreak('connect_error');
+    });
+
+    socket.on('error', (err) => {
+      console.error('❌ WebSocket error:', err.message);
+      handleSessionBreak('error');
+    });
+  }
+
   async function handleSubmit() {
     if (loading) return;
     setBanner(null);
@@ -72,9 +133,11 @@ export default function Login() {
 
     setLoading(true);
     try {
-      const cred    = await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
+      // 🔹 Step 1: Firebase credential verification
+      const cred = await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
       const idToken = await cred.user.getIdToken();
 
+      // 🔹 Step 2: Backend verification + JWT issuance (for API Authorization headers)
       const { data } = await api.post(
         '/api/auth/login',
         { officerId: officerId.trim().toUpperCase() },
@@ -83,14 +146,20 @@ export default function Login() {
 
       if (!data?.token) throw new Error('No token returned');
 
-      // ✅ Persist and update context → triggers redirect via useEffect
+      // 🔹 Step 3: Store JWT in context for API calls (Authorization header)
       ctxLogin({
-        token:     data.token,
+        token:     data.token,        // ✅ Used for API Authorization headers
         officerId: data.officerId ?? officerId.trim().toUpperCase(),
         uid:       cred.user.uid,
         role:      data.role   ?? 'officer',
         status:    data.status ?? 'approved',
       });
+
+      // 🔹 Step 4: For admins/superadmins → establish WebSocket session (session persistence ONLY)
+      // If WebSocket disconnects → instant logout regardless of JWT validity
+      if (STRICT_ROLES.has(data.role)) {
+        setupAdminWebSocket(data.token, data.officerId, data.role);
+      }
 
       navigate('/dashboard', { replace: true });
 
@@ -197,7 +266,6 @@ export default function Login() {
 }
 
 // ─── Field sub-component ──────────────────────────────────────────────────────
-
 interface FieldProps {
   label: string; id: string; type?: string; value: string;
   onChange: (v: string) => void; error?: string; placeholder: string;
