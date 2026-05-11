@@ -1,665 +1,257 @@
-/**
- * src/pages/Login.tsx
- *
- * Sign-in page for the ZRP Admin web application.
- *
- * Handles:
- *  - Field-level validation
- *  - Firebase credential verification → backend JWT exchange
- *  - Network errors
- *  - VPN / proxy blocking (COMMERCIAL_VPN_BLOCKED from backend)
- *  - Pending account ("admins haven't allowed you yet")
- *  - Rejected / banned account
- *  - Session expiry (JWT_EXPIRED from a previous session)
- *  - Double-press prevention (button disabled while loading)
- *  - Redirect to /dashboard on success
- */
-
-import React, { useState, useRef, useCallback, useEffect } from "react";
-import { useNavigate, Link, useLocation }                    from "react-router-dom";
-import { signInWithEmailAndPassword, signOut }                from "firebase/auth";
-import axios, { type AxiosError }                             from "axios";
-
-import { auth } from "../auth/firebaseConfig";
-import { useOfficer }                                         from "../context/OfficerContext";
-
-// ─── API client ───────────────────────────────────────────────────────────────
+import React, { useState, useRef, useEffect } from 'react';
+import { useNavigate, Link, useLocation } from 'react-router-dom';
+import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import axios, { type AxiosError } from 'axios';
+import { auth } from '../auth/firebaseConfig';
+import { useAuth } from '../context/AuthContext';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_BACKEND_URL,
   timeout: 15_000,
-  headers: { "Content-Type": "application/json" },
+  headers: { 'Content-Type': 'application/json' },
 });
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
+const OFFICER_ID_RE = /^[A-Z]\d{6}[A-Z]$|^\d{9}$/i;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
-interface FieldErrors {
-  officerId?: string;
-  email?:     string;
-  password?:  string;
-}
+type BannerType = 'error' | 'warning' | 'success';
 
-type BannerType = "error" | "warning" | "info" | "success";
-
-interface BannerState {
-  type:    BannerType;
-  title?:  string;
-  message: string;
-}
-
-// ─── Error catalogue ──────────────────────────────────────────────────────────
-
-/**
- * Maps backend / Firebase error codes to user-facing copy.
- * field: which input to highlight, if any.
- * banner: what to show in the top banner.
- */
-const ERROR_MAP: Record<
-  string,
-  { field?: keyof FieldErrors; bannerType: BannerType; title?: string; message: string }
-> = {
-  // Auth / credential errors
-  INVALID_CREDENTIAL: {
-    field:      "password",
-    bannerType: "error",
-    message:    "The Officer ID, email or password you entered is incorrect. Please check your details and try again.",
-  },
-  INVALID_CREDENTIALS: {
-    field:      "password",
-    bannerType: "error",
-    message:    "The Officer ID, email or password you entered is incorrect. Please check your details and try again.",
-  },
-  OFFICER_ID_MISMATCH: {
-    field:      "officerId",
-    bannerType: "error",
-    message:    "The Officer ID does not match the account registered to this email address.",
-  },
-  USER_NOT_FOUND: {
-    field:      "email",
-    bannerType: "error",
-    message:    "No account was found for this email address. Please check your email or register.",
-  },
-  TOO_MANY_REQUESTS: {
-    bannerType: "warning",
-    title:      "Account Temporarily Locked",
-    message:    "Too many failed attempts have been detected. Please wait a few minutes before trying again, or reset your password.",
-  },
-  USER_DISABLED: {
-    bannerType: "error",
-    title:      "Account Disabled",
-    message:    "This Firebase account has been disabled. Please contact your system administrator.",
-  },
-
-  // Account status errors
-  ACCOUNT_PENDING: {
-    bannerType: "warning",
-    title:      "Account Pending Approval",
-    message:
-      "We sincerely regret that our administrators have not yet granted you access to the system. " +
-      "Your registration is being reviewed and you will be notified by email once approved. " +
-      "If you believe this is an error, please contact your commanding officer or system administrator.",
-  },
-  ACCOUNT_REJECTED: {
-    bannerType: "error",
-    title:      "Account Access Denied",
-    message:
-      "Access to this account has been denied by an administrator. " +
-      "If you believe this is in error, please contact your commanding officer immediately.",
-  },
-
-  // Session errors
-  TOKEN_EXPIRED: {
-    bannerType: "warning",
-    title:      "Session Expired",
-    message:    "We're sorry — your previous session has expired. Please sign in again to continue using the application.",
-  },
-  JWT_EXPIRED: {
-    bannerType: "warning",
-    title:      "Session Expired",
-    message:    "We're sorry — your previous session has expired. Please sign in again to continue using the application.",
-  },
-  INVALID_TOKEN: {
-    bannerType: "warning",
-    title:      "Session Expired",
-    message:    "We're sorry — your previous session has expired. Please sign in again to continue using the application.",
-  },
-
-  // VPN / proxy
-  COMMERCIAL_VPN_BLOCKED: {
-    bannerType: "error",
-    title:      "Connection Blocked",
-    message:
-      "Your connection has been identified as originating from a VPN or proxy service. " +
-      "For security reasons, access to the BlowSafe platform is restricted to direct connections only. " +
-      "Please disable your VPN and try again.",
-  },
-  VPN_BLOCKED: {
-    bannerType: "error",
-    title:      "Connection Blocked",
-    message:
-      "Your connection has been identified as originating from a VPN or proxy service. " +
-      "Please disable your VPN and try again.",
-  },
-
-  // Network
-  NETWORK_ERROR: {
-    bannerType: "error",
-    title:      "Connection Error",
-    message:    "Unable to reach the BlowSafe servers. Please check your internet connection and try again.",
-  },
-
-  // Email not verified
-  EMAIL_NOT_VERIFIED: {
-    bannerType: "warning",
-    title:      "Email Not Verified",
-    message:    "Your email address has not been verified yet. Please check your inbox for the verification link that was sent when you registered.",
-  },
-
-  // Fallback
-  SERVER_ERROR: {
-    bannerType: "error",
-    title:      "Server Error",
-    message:    "An unexpected server error occurred. Please try again in a few minutes. If the problem persists, contact your system administrator.",
-  },
+const ERROR_MAP: Record<string, { type: BannerType; title: string; message: string; field?: string }> = {
+  INVALID_CREDENTIAL:      { type: 'error',   title: 'Invalid Credentials',   message: 'Officer ID, email or password is incorrect.' },
+  USER_NOT_FOUND:          { type: 'error',   title: 'Not Found',             message: 'No account found for this email address.' },
+  TOO_MANY_REQUESTS:       { type: 'warning', title: 'Account Locked',        message: 'Too many attempts. Wait a few minutes.' },
+  ACCOUNT_PENDING:         { type: 'warning', title: 'Pending Approval',      message: 'Your account is awaiting administrator approval. You will be notified by email once approved.' },
+  ACCOUNT_REJECTED:        { type: 'error',   title: 'Access Denied',         message: 'Access has been denied. Contact your commanding officer.' },
+  EMAIL_NOT_VERIFIED:      { type: 'warning', title: 'Verify Email',          message: 'Check your inbox for the verification link sent at registration.' },
+  COMMERCIAL_VPN_BLOCKED:  { type: 'error',   title: 'VPN Detected',          message: 'Disable your VPN and try again.' },
+  NETWORK_ERROR:           { type: 'error',   title: 'Connection Error',      message: 'Cannot reach servers. Check your connection.' },
+  SERVER_ERROR:            { type: 'error',   title: 'Server Error',          message: 'Unexpected server error. Try again shortly.' },
 };
 
-function resolveError(code: string, fallback: string) {
-  return (
-    ERROR_MAP[code] ?? {
-      bannerType: "error" as BannerType,
-      message:    fallback,
-    }
-  );
-}
-
-// ─── Validation ───────────────────────────────────────────────────────────────
-
-const OFFICER_ID_RE = /^[A-Z]\d{6}[A-Z]$|^\d{9}$/i;
-const EMAIL_RE      = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
-
-function validateFields(
-  officerId: string,
-  email:     string,
-  password:  string
-): FieldErrors {
-  const errs: FieldErrors = {};
-  if (!officerId.trim())
-    errs.officerId = "Officer ID is required.";
-  else if (!OFFICER_ID_RE.test(officerId.trim()))
-    errs.officerId = "Invalid format — expected A123456B or 9 digits.";
-  if (!email.trim())
-    errs.email = "Email address is required.";
-  else if (!EMAIL_RE.test(email.trim()))
-    errs.email = "Enter a valid email address.";
-  if (!password)
-    errs.password = "Password is required.";
-  return errs;
-}
-
-// ─── Sub-components ───────────────────────────────────────────────────────────
-
-interface BannerProps {
-  banner:  BannerState;
-  onClose: () => void;
-}
-
-function Banner({ banner, onClose }: BannerProps) {
-  const palette: Record<BannerType, { bg: string; border: string; text: string; icon: string }> = {
-    error:   { bg: "rgba(255,76,76,0.08)",   border: "#FF4C4C", text: "#FF4C4C",   icon: "✕" },
-    warning: { bg: "rgba(255,165,0,0.08)",   border: "#FFA500", text: "#FFA500",   icon: "⚠" },
-    info:    { bg: "rgba(59,139,235,0.08)",   border: "#3B8BEB", text: "#3B8BEB",   icon: "ℹ" },
-    success: { bg: "rgba(29,185,84,0.08)",    border: "#1DB954", text: "#1DB954",   icon: "✓" },
-  };
-  const p = palette[banner.type];
-
-  return (
-    <div
-      role="alert"
-      aria-live="polite"
-      style={{
-        width: "100%", maxWidth: 480, marginBottom: 20,
-        background: p.bg, border: `1px solid ${p.border}`,
-        borderLeft: `4px solid ${p.border}`, borderRadius: 10,
-        padding: "14px 44px 14px 18px", position: "relative",
-        animation: "bannerIn 240ms ease-out",
-      }}
-    >
-      {banner.title && (
-        <p style={{ margin: "0 0 4px", color: p.text, fontSize: 13, fontWeight: 700, letterSpacing: "0.2px" }}>
-          {banner.title}
-        </p>
-      )}
-      <p style={{ margin: 0, color: "#ccc", fontSize: 13, lineHeight: 1.65 }}>
-        {banner.message}
-      </p>
-      <button
-        onClick={onClose}
-        aria-label="Dismiss"
-        style={{
-          position: "absolute", top: 10, right: 12, background: "none",
-          border: "none", color: p.text, fontSize: 16, cursor: "pointer",
-          opacity: 0.7, lineHeight: 1, padding: 4,
-        }}
-      >
-        {p.icon}
-      </button>
-    </div>
-  );
-}
-
-interface FieldProps {
-  label:        string;
-  id:           string;
-  type?:        string;
-  value:        string;
-  onChange:     (v: string) => void;
-  error?:       string;
-  placeholder:  string;
-  disabled?:    boolean;
-  autoComplete?: string;
-  hint?:        string;
-  onEnter?:     () => void;
-}
-
-function Field({
-  label, id, type = "text", value, onChange, error,
-  placeholder, disabled, autoComplete, hint, onEnter,
-}: FieldProps) {
-  const [focused, setFocused] = useState(false);
-  const borderColor = error
-    ? "#FF4C4C"
-    : focused
-    ? "#1DB954"
-    : "#2a2a2a";
-  const boxShadow = error
-    ? "0 0 0 3px rgba(255,76,76,0.12)"
-    : focused
-    ? "0 0 0 3px rgba(29,185,84,0.12)"
-    : "none";
-
-  return (
-    <div style={{ marginBottom: 4 }}>
-      <label
-        htmlFor={id}
-        style={{
-          display: "block", marginBottom: 6, color: "#888",
-          fontSize: 11, fontWeight: 700, letterSpacing: "0.8px", textTransform: "uppercase",
-        }}
-      >
-        {label}
-      </label>
-      <input
-        id={id} type={type} value={value}
-        placeholder={placeholder}
-        disabled={disabled}
-        autoComplete={autoComplete}
-        onChange={(e) => onChange(e.target.value)}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
-        onKeyDown={(e) => { if (e.key === "Enter" && onEnter) onEnter(); }}
-        style={{
-          width: "100%", background: "#1a1a1a",
-          color: disabled ? "#555" : "#fff",
-          border: `1px solid ${borderColor}`,
-          borderRadius: 8, padding: "13px 14px", fontSize: 15,
-          outline: "none", boxSizing: "border-box",
-          transition: "border-color 180ms, box-shadow 180ms",
-          boxShadow, opacity: disabled ? 0.6 : 1,
-          cursor: disabled ? "not-allowed" : "text",
-          caretColor: "#1DB954",
-        }}
-      />
-      {hint && !error && (
-        <p style={{ margin: "5px 0 0 2px", color: "#555", fontSize: 11, lineHeight: 1.5 }}>
-          {hint}
-        </p>
-      )}
-      {error && (
-        <p
-          role="alert"
-          style={{
-            margin: "5px 0 0 2px", color: "#FF4C4C",
-            fontSize: 12, lineHeight: 1.5, animation: "shake 260ms ease-in-out",
-          }}
-        >
-          {error}
-        </p>
-      )}
-    </div>
-  );
-}
-
-// ─── Main component ───────────────────────────────────────────────────────────
-
 export default function Login() {
-  const navigate  = useNavigate();
-  const location  = useLocation();
-  const { setOfficer } = useOfficer();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { login: ctxLogin, isAuthenticated } = useAuth();
 
-  const [officerId, setOfficerId] = useState("");
-  const [email,     setEmail]     = useState("");
-  const [password,  setPassword]  = useState("");
-
-  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
-  const [banner,      setBanner]      = useState<BannerState | null>(null);
-  const [loading,     setLoading]     = useState(false);
+  const [officerId, setOfficerId] = useState('');
+  const [email, setEmail]         = useState('');
+  const [password, setPassword]   = useState('');
+  const [errors, setErrors]       = useState<Record<string, string>>({});
+  const [banner, setBanner]       = useState<{ type: BannerType; title: string; message: string } | null>(null);
+  const [loading, setLoading]     = useState(false);
 
   const bannerRef = useRef<HTMLDivElement>(null);
 
-  // Show session-expired banner if redirected here with a reason
+  // Already logged in → go to dashboard
   useEffect(() => {
-    const state = location.state as { reason?: string } | null;
-    if (state?.reason === "session_expired") {
-      setBanner({
-        type:    "warning",
-        title:   "Session Expired",
-        message:
-          "We're sorry — your session has expired. Please sign in again to continue using the application.",
-      });
-      // Clear the state so a refresh doesn't re-show it
-      window.history.replaceState({}, document.title);
-    }
-  }, [location.state]);
+    if (isAuthenticated) navigate('/dashboard', { replace: true });
+  }, [isAuthenticated, navigate]);
 
-  const showBanner = useCallback((state: BannerState) => {
-    setBanner(state);
-    setTimeout(
-      () => bannerRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }),
-      40
-    );
+  // Session-expired banner from redirect
+  useEffect(() => {
+    const state = location.state as { expired?: boolean } | null;
+    if (state?.expired) {
+      setBanner({ type: 'warning', title: 'Session Expired', message: 'Your session expired. Please sign in again.' });
+      window.history.replaceState({}, '');
+    }
   }, []);
 
-  const clearFieldError = useCallback(
-    (field: keyof FieldErrors) => {
-      setFieldErrors((prev) => {
-        if (!prev[field]) return prev;
-        const next = { ...prev };
-        delete next[field];
-        return next;
-      });
-    },
-    []
-  );
+  function validate(): boolean {
+    const e: Record<string, string> = {};
+    if (!OFFICER_ID_RE.test(officerId.trim())) e.officerId = 'Invalid format — expected A123456B or 9 digits';
+    if (!EMAIL_RE.test(email.trim()))           e.email     = 'Enter a valid email address';
+    if (!password)                              e.password  = 'Password is required';
+    setErrors(e);
+    return Object.keys(e).length === 0;
+  }
 
-  // ─── Submit ─────────────────────────────────────────────────────────────────
-
-  const handleSubmit = async () => {
-    if (loading) return; // hard guard against double-press
+  async function handleSubmit() {
+    if (loading) return;
     setBanner(null);
+    if (!validate()) return;
 
-    const normId    = officerId.trim().toUpperCase();
-    const normEmail = email.trim().toLowerCase();
-
-    const errs = validateFields(normId, normEmail, password);
-    if (Object.keys(errs).length > 0) {
-      setFieldErrors(errs);
-      showBanner({
-        type:    "error",
-        message: "Please correct the highlighted fields before continuing.",
-      });
-      return;
-    }
-    setFieldErrors({});
     setLoading(true);
-
     try {
-      // 🔹 Step 1: Firebase credential verification
-      const credential = await signInWithEmailAndPassword(auth, normEmail, password);
-      const firebaseUser = credential.user;
-      const idToken = await firebaseUser.getIdToken();
+      const cred    = await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
+      const idToken = await cred.user.getIdToken();
 
-      // 🔹 Step 2: Exchange Firebase token for backend JWT
-      const response = await api.post(
-        "/api/auth/login", // ✅ Direct endpoint call
-        { officerId: normId },
+      const { data } = await api.post(
+        '/api/auth/login',
+        { officerId: officerId.trim().toUpperCase() },
         { headers: { Authorization: `Bearer ${idToken}` } }
       );
 
-      const data = response.data;
+      if (!data?.token) throw new Error('No token returned');
 
-      if (!data?.token) {
-        throw new Error("Backend did not return an authentication token.");
-      }
-
-      // 🔹 Step 3: Persist session (matches your existing flow)
-      localStorage.setItem("jwt_token", data.token);
-      localStorage.setItem("officer_id", data.officerId);
-      localStorage.setItem("user_uid", firebaseUser.uid);
-      localStorage.setItem("jwt_expires_at", String(Date.now() + 5 * 60 * 1000));
-
-      // 🔹 Step 4: Set officer context and navigate
-      await setOfficer({
-        uid:       firebaseUser.uid,
-        officerId: data.officerId,
-        role:      data.role as "admin" | "officer",
-        status:    data.status as "active" | "rejected" | "pending",
+      // ✅ Persist and update context → triggers redirect via useEffect
+      ctxLogin({
+        token:     data.token,
+        officerId: data.officerId ?? officerId.trim().toUpperCase(),
+        uid:       cred.user.uid,
+        role:      data.role   ?? 'officer',
+        status:    data.status ?? 'approved',
       });
 
-      navigate("/dashboard", { replace: true });
+      navigate('/dashboard', { replace: true });
 
     } catch (err: any) {
-      // 🔹 Error handling — same error mapping as before
       await signOut(auth).catch(() => null);
 
-      let code = "SERVER_ERROR";
-      let message = "An unexpected error occurred. Please try again.";
-
-      // Firebase errors
-      if (err.code?.startsWith("auth/")) {
-        const fbMap: Record<string, string> = {
-          "auth/invalid-credential": "INVALID_CREDENTIAL",
-          "auth/wrong-password": "INVALID_CREDENTIAL",
-          "auth/user-not-found": "USER_NOT_FOUND",
-          "auth/too-many-requests": "TOO_MANY_REQUESTS",
-          "auth/user-disabled": "USER_DISABLED",
-          "auth/network-request-failed": "NETWORK_ERROR",
+      let code = 'SERVER_ERROR';
+      if (err?.code?.startsWith('auth/')) {
+        const map: Record<string, string> = {
+          'auth/invalid-credential':     'INVALID_CREDENTIAL',
+          'auth/wrong-password':         'INVALID_CREDENTIAL',
+          'auth/user-not-found':         'USER_NOT_FOUND',
+          'auth/too-many-requests':      'TOO_MANY_REQUESTS',
+          'auth/network-request-failed': 'NETWORK_ERROR',
         };
-        code = fbMap[err.code] ?? err.code.replace("auth/", "").toUpperCase().replace(/-/g, "_");
-        message = err.message ?? "Firebase authentication failed.";
-      }
-      // Axios / backend errors
-      else if (err.isAxiosError) {
-        const axiosErr = err as AxiosError<{ code?: string; message?: string }>;
-        if (axiosErr.response) {
-          code = axiosErr.response.data?.code ?? `HTTP_${axiosErr.response.status}`;
-          message = axiosErr.response.data?.message ?? axiosErr.message ?? "Server error.";
-        } else if (axiosErr.request) {
-          code = "NETWORK_ERROR";
-          message = "Unable to reach the server. Please check your connection.";
+        code = map[err.code] ?? 'SERVER_ERROR';
+      } else if ((err as AxiosError).isAxiosError) {
+        const ae = err as AxiosError<{ code?: string; message?: string }>;
+        if (!ae.response) code = 'NETWORK_ERROR';
+        else {
+          const bc = ae.response.data?.code ?? '';
+          if (bc.includes('PENDING'))  code = 'ACCOUNT_PENDING';
+          else if (bc.includes('REJECT') || bc.includes('BAN')) code = 'ACCOUNT_REJECTED';
+          else if (bc.includes('VPN'))  code = 'COMMERCIAL_VPN_BLOCKED';
+          else if (bc.includes('EMAIL_NOT_VERIFIED')) code = 'EMAIL_NOT_VERIFIED';
+          else code = bc || 'SERVER_ERROR';
         }
       }
 
-      const resolved = resolveError(code, message);
-      if (resolved.field) {
-        setFieldErrors({ [resolved.field]: resolved.message });
-      }
-      showBanner({
-        type:    resolved.bannerType,
-        title:   resolved.title,
-        message: resolved.message,
-      });
+      const resolved = ERROR_MAP[code] ?? ERROR_MAP.SERVER_ERROR;
+      setBanner(resolved);
+      setTimeout(() => bannerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 40);
     } finally {
       setLoading(false);
     }
-  };
-
-  // ─── Render ─────────────────────────────────────────────────────────────────
+  }
 
   return (
-    <div
-      style={{
-        minHeight: "100vh", background: "#0a0a0a",
-        display: "flex", flexDirection: "column",
-        alignItems: "center", padding: "48px 16px 64px",
-      }}
-    >
-      {/* ── Banner anchor ─────────────────────────────────────────────────── */}
-      <div ref={bannerRef} style={{ width: "100%", maxWidth: 480 }}>
-        {banner && (
-          <Banner banner={banner} onClose={() => setBanner(null)} />
-        )}
-      </div>
+    <div style={styles.root}>
+      <div style={styles.card}>
+        {/* Header */}
+        <div style={styles.header}>
+          <div style={styles.badge}>ZRP</div>
+          <div>
+            <h1 style={styles.title}>Officer Sign In</h1>
+            <p style={styles.subtitle}>Zimbabwe Republic Police · Traffic Enforcement</p>
+          </div>
+        </div>
 
-      {/* ── Heading ───────────────────────────────────────────────────────── */}
-      <div style={{ width: "100%", maxWidth: 480, marginBottom: 32 }}>
-        <h1
-          style={{
-            margin: "0 0 6px", fontSize: 26, fontWeight: 700,
-            color: "#1DB954", letterSpacing: "-0.5px",
-          }}
-        >
-          Officer Sign In
-        </h1>
-        <p style={{ margin: 0, color: "#666", fontSize: 14, lineHeight: 1.6 }}>
-          Zimbabwe Republic Police · Traffic Enforcement Division
+        {/* Banner */}
+        <div ref={bannerRef}>
+          {banner && (
+            <div style={{ ...styles.banner, ...bannerColors[banner.type] }}>
+              <div>
+                <p style={styles.bannerTitle}>{banner.title}</p>
+                <p style={styles.bannerMsg}>{banner.message}</p>
+              </div>
+              <button style={styles.bannerClose} onClick={() => setBanner(null)}>✕</button>
+            </div>
+          )}
+        </div>
+
+        {/* Fields */}
+        <div style={styles.fields}>
+          <Field label="Officer ID" id="officerId" value={officerId}
+            onChange={v => { setOfficerId(v); setErrors(e => ({ ...e, officerId: '' })); }}
+            error={errors.officerId} placeholder="A123456B" hint="Format: A123456B or 9 digits"
+            autoComplete="username" disabled={loading} onEnter={handleSubmit} />
+
+          <Field label="Email Address" id="email" type="email" value={email}
+            onChange={v => { setEmail(v); setErrors(e => ({ ...e, email: '' })); }}
+            error={errors.email} placeholder="officer@zrp.gov.zw"
+            autoComplete="email" disabled={loading} onEnter={handleSubmit} />
+
+          <Field label="Password" id="password" type="password" value={password}
+            onChange={v => { setPassword(v); setErrors(e => ({ ...e, password: '' })); }}
+            error={errors.password} placeholder="Enter your password"
+            autoComplete="current-password" disabled={loading} onEnter={handleSubmit} />
+        </div>
+
+        <button style={{ ...styles.btn, ...(loading ? styles.btnDisabled : {}) }}
+          onClick={handleSubmit} disabled={loading}>
+          {loading
+            ? <><Spinner /> Signing In…</>
+            : 'Sign In'}
+        </button>
+
+        <div style={styles.footer}>
+          <span style={styles.footerText}>No account? </span>
+          <Link to="/signup" style={styles.link}>Register</Link>
+        </div>
+
+        <p style={styles.legal}>
+          ⚠ Unauthorised access is a criminal offence under the Computer Crime and Cyber Crime Act [Chapter 9:23]. All access is logged.
         </p>
       </div>
 
-      {/* ── Form card ─────────────────────────────────────────────────────── */}
-      <div
-        style={{
-          width: "100%", maxWidth: 480,
-          background: "#111", borderRadius: 14,
-          border: "1px solid #1e1e1e", padding: "32px 28px",
-          display: "flex", flexDirection: "column", gap: 14,
-        }}
-      >
-        <Field
-          label="Officer ID"
-          id="officerId"
-          value={officerId}
-          onChange={(v) => { setOfficerId(v); clearFieldError("officerId"); }}
-          error={fieldErrors.officerId}
-          placeholder="e.g. A123456B"
-          disabled={loading}
-          autoComplete="username"
-          hint="Format: A123456B or 9 numeric digits"
-          onEnter={handleSubmit}
-        />
-
-        <Field
-          label="Email Address"
-          id="email"
-          type="email"
-          value={email}
-          onChange={(v) => { setEmail(v); clearFieldError("email"); }}
-          error={fieldErrors.email}
-          placeholder="officer@zrp.gov.zw"
-          disabled={loading}
-          autoComplete="email"
-          onEnter={handleSubmit}
-        />
-
-        <Field
-          label="Password"
-          id="password"
-          type="password"
-          value={password}
-          onChange={(v) => { setPassword(v); clearFieldError("password"); }}
-          error={fieldErrors.password}
-          placeholder="Enter your password"
-          disabled={loading}
-          autoComplete="current-password"
-          onEnter={handleSubmit}
-        />
-
-        {/* Forgot password */}
-        <div style={{ textAlign: "right", marginTop: -6 }}>
-          <Link
-            to="/forgot-password"
-            style={{
-              color: "#555", fontSize: 12, textDecoration: "none",
-              transition: "color 160ms",
-            }}
-            onMouseEnter={(e) => { (e.target as HTMLElement).style.color = "#1DB954"; }}
-            onMouseLeave={(e) => { (e.target as HTMLElement).style.color = "#555"; }}
-          >
-            Forgot your password?
-          </Link>
-        </div>
-
-        {/* Submit button */}
-        <button
-          type="button"
-          onClick={handleSubmit}
-          disabled={loading}
-          aria-busy={loading}
-          style={{
-            marginTop: 8, width: "100%", padding: "14px",
-            background: loading ? "#155c30" : "#1DB954",
-            color: "#000", border: "none", borderRadius: 30,
-            fontSize: 16, fontWeight: 700,
-            cursor: loading ? "not-allowed" : "pointer",
-            display: "flex", alignItems: "center",
-            justifyContent: "center", gap: 10,
-            transition: "background 200ms, transform 100ms",
-            transform: "scale(1)",
-          }}
-          onMouseDown={(e) => {
-            if (!loading) (e.currentTarget.style.transform = "scale(0.98)");
-          }}
-          onMouseUp={(e) => {
-            (e.currentTarget.style.transform = "scale(1)");
-          }}
-        >
-          {loading ? (
-            <>
-              <span
-                style={{
-                  width: 18, height: 18,
-                  border: "2px solid rgba(0,0,0,0.25)",
-                  borderTop: "2px solid #000",
-                  borderRadius: "50%",
-                  animation: "spin 0.7s linear infinite",
-                  flexShrink: 0,
-                }}
-              />
-              Signing In…
-            </>
-          ) : (
-            "Sign In"
-          )}
-        </button>
-      </div>
-
-      {/* ── Footer links ──────────────────────────────────────────────────── */}
-      <p style={{ marginTop: 24, color: "#555", fontSize: 14 }}>
-        Don't have an account?{" "}
-        <Link
-          to="/signup"
-          style={{ color: "#1DB954", fontWeight: 600, textDecoration: "none" }}
-        >
-          Register
-        </Link>
-      </p>
-
-      {/* ── Legal notice ──────────────────────────────────────────────────── */}
-      <p
-        style={{
-          marginTop: 28, maxWidth: 440, color: "#333",
-          fontSize: 11, textAlign: "center", lineHeight: 1.7,
-        }}
-      >
-        ⚠️ Unauthorised access to this system is a criminal offence under the Computer
-        Crime and Cyber Crime Act [Chapter 9:23] of Zimbabwe. All access attempts are
-        logged and monitored.
-      </p>
-
-      {/* ── Global keyframes ──────────────────────────────────────────────── */}
       <style>{`
-        @keyframes bannerIn {
-          from { opacity: 0; transform: translateY(-10px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes shake {
-          0%, 100% { transform: translateX(0); }
-          25%      { transform: translateX(-4px); }
-          75%      { transform: translateX(4px); }
-        }
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes fadeUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
       `}</style>
     </div>
   );
 }
+
+// ─── Field sub-component ──────────────────────────────────────────────────────
+
+interface FieldProps {
+  label: string; id: string; type?: string; value: string;
+  onChange: (v: string) => void; error?: string; placeholder: string;
+  hint?: string; autoComplete?: string; disabled?: boolean; onEnter?: () => void;
+}
+
+function Field({ label, id, type = 'text', value, onChange, error, placeholder, hint, autoComplete, disabled, onEnter }: FieldProps) {
+  const [focused, setFocused] = useState(false);
+  const border = error ? '#FF4C4C' : focused ? '#1DB954' : '#222';
+  return (
+    <div style={{ marginBottom: 4 }}>
+      <label htmlFor={id} style={styles.label}>{label}</label>
+      <input id={id} type={type} value={value} placeholder={placeholder}
+        autoComplete={autoComplete} disabled={disabled}
+        onChange={e => onChange(e.target.value)}
+        onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+        onKeyDown={e => e.key === 'Enter' && onEnter?.()}
+        style={{ ...styles.input, borderColor: border, boxShadow: focused ? `0 0 0 3px ${error ? 'rgba(255,76,76,.12)' : 'rgba(29,185,84,.12)'}` : 'none' }} />
+      {hint && !error && <p style={styles.hint}>{hint}</p>}
+      {error && <p style={styles.error}>{error}</p>}
+    </div>
+  );
+}
+
+function Spinner() {
+  return <span style={{ width: 16, height: 16, border: '2px solid rgba(0,0,0,.25)', borderTop: '2px solid #000', borderRadius: '50%', display: 'inline-block', animation: 'spin .7s linear infinite', marginRight: 8 }} />;
+}
+
+const bannerColors: Record<BannerType, React.CSSProperties> = {
+  error:   { background: 'rgba(255,76,76,.08)',  borderColor: '#FF4C4C' },
+  warning: { background: 'rgba(255,165,0,.08)',  borderColor: '#FFA500' },
+  success: { background: 'rgba(29,185,84,.08)',  borderColor: '#1DB954' },
+};
+
+const styles: Record<string, React.CSSProperties> = {
+  root: { minHeight: '100vh', background: '#080808', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '32px 16px', fontFamily: "'DM Mono', 'Courier New', monospace" },
+  card: { width: '100%', maxWidth: 440, background: '#0f0f0f', border: '1px solid #1a1a1a', borderRadius: 16, padding: '36px 32px', animation: 'fadeUp .35s ease-out' },
+  header: { display: 'flex', alignItems: 'center', gap: 14, marginBottom: 28 },
+  badge: { width: 44, height: 44, background: '#1DB954', borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#000', fontWeight: 800, fontSize: 13, letterSpacing: 1, flexShrink: 0 },
+  title: { margin: 0, fontSize: 20, fontWeight: 700, color: '#fff', letterSpacing: '-0.4px' },
+  subtitle: { margin: 0, fontSize: 11, color: '#444', marginTop: 2 },
+  banner: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', border: '1px solid', borderRadius: 10, padding: '12px 14px', marginBottom: 20 },
+  bannerTitle: { margin: '0 0 3px', fontSize: 12, fontWeight: 700, color: '#fff' },
+  bannerMsg: { margin: 0, fontSize: 12, color: '#aaa', lineHeight: 1.5 },
+  bannerClose: { background: 'none', border: 'none', color: '#555', cursor: 'pointer', fontSize: 14, padding: '0 0 0 8px', flexShrink: 0 },
+  fields: { display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 },
+  label: { display: 'block', marginBottom: 5, color: '#555', fontSize: 10, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase' },
+  input: { width: '100%', background: '#151515', color: '#fff', border: '1px solid #222', borderRadius: 8, padding: '12px 14px', fontSize: 14, outline: 'none', boxSizing: 'border-box', transition: 'border-color .15s, box-shadow .15s', fontFamily: 'inherit' },
+  hint: { margin: '4px 0 0 2px', color: '#444', fontSize: 11 },
+  error: { margin: '4px 0 0 2px', color: '#FF4C4C', fontSize: 11 },
+  btn: { width: '100%', background: '#1DB954', color: '#000', border: 'none', borderRadius: 10, padding: '13px', fontSize: 14, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', letterSpacing: '0.3px', transition: 'opacity .15s' },
+  btnDisabled: { opacity: 0.6, cursor: 'not-allowed' },
+  footer: { display: 'flex', justifyContent: 'center', gap: 6, marginTop: 18, fontSize: 13 },
+  footerText: { color: '#444' },
+  link: { color: '#1DB954', textDecoration: 'none', fontWeight: 600 },
+  legal: { marginTop: 24, color: '#2a2a2a', fontSize: 10, textAlign: 'center', lineHeight: 1.6 },
+};

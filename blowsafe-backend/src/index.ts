@@ -1,6 +1,6 @@
 /**
  * blowsafe-backend/src/index.ts
- * BlowSafe API server entry point (ADVANCED LOGGING + LOGIN ROUTE)
+ * BlowSafe API server entry point (ADVANCED LOGGING + LOGIN ROUTE + WEBSOCKET)
  */
 
 import express from "express";
@@ -9,17 +9,17 @@ import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
+import { Server as SocketIOServer } from "socket.io";
+import { verify, JwtPayload } from "jsonwebtoken";
 
 import { env } from "./config/env";
-import { connectMongo } from "./config/mongo";
+import { connectMongo, getDb } from "./config/mongo";
 import { initFirebaseAdmin } from "./config/firebase";
-import { initSocket } from "./config/socket";
 import { blockCommercialVPN } from "./middleware/vpnBlocker";
 
 // Routes
 import registerRoutes from "./routes/register";
-import loginRoutes from "./auth/login"; // 🔐 Exact match: src/auth/login.ts
-// import authRoutes from "./routes/auth"; // 👈 Uncomment ONLY if you have other /api/auth/* routes
+import loginRoutes from "./auth/login";
 import adminRoutes from "./routes/admin";
 import uploadRoutes from "./routes/upload";
 import recordsRoutes from "./routes/records";
@@ -62,10 +62,7 @@ console.log("🌍 Configuring CORS...");
 
 app.use(
   cors({
-    origin:
-      env.NODE_ENV === "production"
-        ? env.CORS_ORIGIN
-        : "*",
+    origin: env.NODE_ENV === "production" ? env.CORS_ORIGIN : "*",
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -173,20 +170,12 @@ const loginLimiter = rateLimit({
 console.log("✅ Rate limiter ready");
 
 // ─────────────────────────────────────────────
-// ROUTES (MOUNTED EXACTLY)
+// ROUTES
 // ─────────────────────────────────────────────
 console.log("🛣️ Loading routes...");
 
-// Public register
 app.use("/api/auth/register", publicLimiter, registerRoutes);
-
-// 🔐 LOGIN ROUTE (matches POST /api/auth/login)
 app.use("/api/auth/login", loginLimiter, loginRoutes);
-
-// 👇 Uncomment ONLY if you have ./routes/auth.ts with other auth endpoints
-// app.use("/api/auth", authRoutes);
-
-// Protected routes
 app.use("/api/admin", adminRoutes);
 app.use("/api", uploadRoutes);
 app.use("/api", recordsRoutes);
@@ -194,16 +183,13 @@ app.use("/api", recordsRoutes);
 console.log("✅ Routes loaded");
 
 // ─────────────────────────────────────────────
-// ROOT
+// ROOT & HEALTH
 // ─────────────────────────────────────────────
 app.get("/", (_req, res) => {
   console.log("🏠 Root endpoint hit");
   res.json({ status: "ok", app: "BlowSafe", version: "1.0.0" });
 });
 
-// ─────────────────────────────────────────────
-// HEALTH
-// ─────────────────────────────────────────────
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", uptime: process.uptime(), timestamp: new Date().toISOString() });
 });
@@ -219,12 +205,7 @@ app.use((req, res) => {
 // ─────────────────────────────────────────────
 // GLOBAL ERROR HANDLER
 // ─────────────────────────────────────────────
-app.use((
-  err: any,
-  req: express.Request,
-  res: express.Response,
-  next: express.NextFunction
-) => {
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (res.headersSent) return next(err);
 
   console.log("\n========================================");
@@ -264,8 +245,68 @@ app.use((
     return res.status(400).json({ success: false, code: "VALIDATION_ERROR", error: Object.values(err.errors).map((e: any) => e.message) });
   }
 
-  return res.status(500).json({ success: false, code: "INTERNAL_ERROR", error: env.NODE_ENV === "production" ? "Internal server error" : err.message });
+  return res.status(500).json({
+    success: false,
+    code: "INTERNAL_ERROR",
+    error: env.NODE_ENV === "production" ? "Internal server error" : err.message,
+  });
 });
+
+// ─────────────────────────────────────────────
+// WEBSOCKET SETUP (Admin/Superadmin Only)
+// ─────────────────────────────────────────────
+const STRICT_ROLES = new Set(["admin", "superadmin"]);
+
+function initWebSocket(server: ReturnType<typeof createServer>) {
+  const io = new SocketIOServer(server, {
+    cors: { origin: env.CORS_ORIGIN || "*", credentials: true },
+    transports: ["websocket"],
+  });
+
+  // 🔐 Auth middleware for WebSocket connections
+  io.use((socket, next) => {
+    const token = socket.handshake.auth.token as string | undefined;
+    if (!token) return next(new Error("Missing authentication token"));
+
+    try {
+      const decoded = verify(token, env.JWT_SECRET, {
+        issuer: "blowsafe-backend",
+        audience: "blowsafe-frontend",
+      }) as JwtPayload & { role: string; officerId: string; uid: string };
+
+      // Only allow strict roles to connect via WebSocket
+      if (!STRICT_ROLES.has(decoded.role)) {
+        return next(new Error("Insufficient privileges for WebSocket session"));
+      }
+
+      // Attach decoded user to socket for later use
+      (socket as any).user = decoded;
+      next();
+    } catch (err) {
+      return next(new Error("Invalid or expired token"));
+    }
+  });
+
+  io.on("connection", (socket) => {
+    const user = (socket as any).user;
+    console.log(`🔌 WS Connected | Officer: ${user.officerId} | Role: ${user.role} | IP: ${socket.handshake.address}`);
+
+    // Optional: Send welcome/heartbeat
+    socket.emit("connected", { message: "Secure session established", timestamp: Date.now() });
+
+    socket.on("disconnect", (reason) => {
+      console.log(`🔌 WS Disconnected | Officer: ${user.officerId} | Reason: ${reason}`);
+      // Optional: Log to audit_logs here if needed
+    });
+
+    socket.on("error", (err) => {
+      console.error(`⚠️ WS Error | Officer: ${user.officerId} | Error: ${err.message}`);
+    });
+  });
+
+  console.log("✅ WebSocket server ready");
+  return io;
+}
 
 // ─────────────────────────────────────────────
 // START SERVER
@@ -280,9 +321,8 @@ async function startServer() {
     await initFirebaseAdmin();
     console.log("✅ Firebase Admin initialized");
 
-    console.log("🔌 Initializing sockets...");
-    initSocket(httpServer);
-    console.log("✅ Socket server ready");
+    console.log("🔌 Initializing WebSockets...");
+    initWebSocket(httpServer);
 
     httpServer.listen(env.PORT, "0.0.0.0", () => {
       console.log("\n========================================");
@@ -290,6 +330,7 @@ async function startServer() {
       console.log("🌍 Environment:", env.NODE_ENV);
       console.log("🌐 Port:", env.PORT);
       console.log("🔗 URL: http://localhost:" + env.PORT);
+      console.log("🔌 WS: ws://localhost:" + env.PORT);
       console.log("⏰ Live At:", new Date().toISOString());
       console.log("========================================\n");
     });
@@ -302,6 +343,9 @@ async function startServer() {
   }
 }
 
+// ─────────────────────────────────────────────
+// PROCESS ERROR HANDLERS
+// ─────────────────────────────────────────────
 process.on("uncaughtException", (err) => {
   console.log("\n========================================");
   console.log("❌ UNCAUGHT EXCEPTION");
