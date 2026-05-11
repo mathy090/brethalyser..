@@ -1,11 +1,11 @@
 /**
  * blowsafe-backend/src/auth/login.ts
  * 
- * Production login: Firebase Auth + MongoDB Read-Only Status Check
+ * Production login: Firebase Auth + Mongoose Read-Only Status Check
  * 
  * Flow:
  * 1. Verify Firebase ID token (proves password is correct)
- * 2. READ officer from MongoDB by officerId (ZERO writes)
+ * 2. READ officer from MongoDB via Mongoose (ZERO writes)
  * 3. Validate email match + account status == "approved"
  * 4. Issue short-lived BlowSafe JWT with user metadata
  * 5. Log audit event (fire-and-forget, non-blocking)
@@ -18,7 +18,7 @@ import admin from "firebase-admin";
 import jwt from "jsonwebtoken";
 
 import { env } from "../config/env";
-import { getDb } from "../config/mongo";
+import { getDb } from "../config/mongo"; // ✅ Now exported
 import { logAudit } from "../utils/auditLogger";
 
 const router = Router();
@@ -30,7 +30,6 @@ interface OfficerDocument {
   email: string;
   role: "admin" | "officer" | "superadmin";
   status: "approved" | "pending" | "rejected" | "banned";
-  // Add other fields as needed, but we only READ these
 }
 
 interface LoginRequest {
@@ -170,8 +169,8 @@ router.post("/", async (req: Request, res: Response) => {
 
     const officerId = normalizeOfficerId(rawOfficerId);
 
-    // ── 4. READ officer from MongoDB (ZERO writes) ───────────────────────────
-    const db = await getDb();
+    // ── 4. READ officer from MongoDB via Mongoose (ZERO writes) ──────────────
+    const db = getDb(); // ✅ Native MongoDB Db from Mongoose
     const officersCollection = db.collection<OfficerDocument>("officers");
 
     // ✅ READ-ONLY: findOne, no updates, no inserts
