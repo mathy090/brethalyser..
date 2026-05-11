@@ -6,9 +6,9 @@ import Signup from './pages/Signup'
 import Dashboard from './pages/Dashboard'
 import ServerScreen from './pages/ServerScreen'
 import VpnBlockedScreen from './pages/VpnBlockedScreen'
-import SessionInterruptedScreen from './pages/SessionInterruptedScreen' // 👈 NEW
+import SessionInterruptedScreen from './pages/SessionInterruptedScreen'
 import ProtectedRoute from './components/ProtectedRoutes'
-import { useAdminWebSocket } from './hooks/useAdminWebSocket' // 👈 NEW
+import { useAdminWebSocket } from './hooks/useAdminWebSocket'
 
 function App() {
   // 👈 Activate WebSocket session control for admin/superadmin

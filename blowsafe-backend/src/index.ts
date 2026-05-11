@@ -13,7 +13,7 @@ import { Server as SocketIOServer } from "socket.io";
 import { verify, JwtPayload } from "jsonwebtoken";
 
 import { env } from "./config/env";
-import { connectMongo, getDb } from "./config/mongo";
+import { connectMongo } from "./config/mongo";
 import { initFirebaseAdmin } from "./config/firebase";
 import { blockCommercialVPN } from "./middleware/vpnBlocker";
 
@@ -33,14 +33,31 @@ const httpServer = createServer(app);
 console.log("\n========================================");
 console.log("🚀 BOOTING BLOWSAFE BACKEND");
 console.log("🌍 Environment:", env.NODE_ENV);
-console.log("🌐 Port:", env.PORT);
+console.log("🌐 Internal Port:", env.PORT);
+
+// ✅ Dynamic public URL detection (Render-friendly)
+const getPublicUrls = () => {
+  const renderUrl = process.env.RENDER_EXTERNAL_URL;
+  const hostname = process.env.HOSTNAME || "0.0.0.0";
+  const isRender = !!renderUrl;
+  
+  return {
+    http: isRender ? `https://${renderUrl}` : `http://${hostname}:${env.PORT}`,
+    ws: isRender ? `wss://${renderUrl}` : `ws://${hostname}:${env.PORT}`,
+    display: isRender ? renderUrl : `${hostname}:${env.PORT}`,
+  };
+};
+
+const urls = getPublicUrls();
+console.log("🌐 Public URL:", urls.http);
+console.log("🔌 Public WS:", urls.ws);
 console.log("⏰ Started:", new Date().toISOString());
 console.log("========================================\n");
 
 // ─────────────────────────────────────────────
 // SECURITY
 // ─────────────────────────────────────────────
-app.set("trust proxy", 1);
+app.set("trust proxy", true); // ✅ Critical for Render proxy headers
 app.disable("x-powered-by");
 
 console.log("🛡️ Loading security middleware...");
@@ -56,13 +73,20 @@ app.use(compression());
 console.log("✅ Security middleware loaded");
 
 // ─────────────────────────────────────────────
-// CORS
+// CORS (Render-friendly dynamic origin)
 // ─────────────────────────────────────────────
 console.log("🌍 Configuring CORS...");
 
 app.use(
   cors({
-    origin: env.NODE_ENV === "production" ? env.CORS_ORIGIN : "*",
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true); // Allow mobile/Postman
+      if (env.NODE_ENV === "production") {
+        const allowed = [env.CORS_ORIGIN, `https://${process.env.RENDER_EXTERNAL_URL}`].filter(Boolean);
+        return allowed.includes(origin) ? callback(null, true) : callback(new Error("Not allowed by CORS"));
+      }
+      return callback(null, true); // Dev: allow all
+    },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -75,10 +99,8 @@ console.log("✅ CORS ready");
 // BODY PARSER
 // ─────────────────────────────────────────────
 console.log("📦 Initializing body parser...");
-
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
-
 console.log("✅ Body parser ready");
 
 // ─────────────────────────────────────────────
@@ -87,14 +109,7 @@ console.log("✅ Body parser ready");
 app.use((req, res, next) => {
   const started = Date.now();
   const requestId = Math.random().toString(36).slice(2, 10);
-
-  const ip =
-    req.headers["cf-connecting-ip"] ||
-    req.headers["x-forwarded-for"] ||
-    req.ip ||
-    req.socket.remoteAddress ||
-    "unknown";
-
+  const ip = req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.ip || "unknown";
   const isHealthCheck = req.path === "/health" || req.path === "/";
   
   if (!isHealthCheck) {
@@ -104,7 +119,6 @@ app.use((req, res, next) => {
     console.log("Path   :", req.originalUrl);
     console.log("IP     :", ip);
     console.log("Time   :", new Date().toISOString());
-
     if (req.body && Object.keys(req.body).length > 0) {
       const sanitized = { ...req.body };
       if (sanitized.password) sanitized.password = "********";
@@ -121,7 +135,6 @@ app.use((req, res, next) => {
       console.log(`📤 [${requestId}] Response Sent`);
       console.log("Status :", res.statusCode);
       console.log("Time   :", `${duration}ms`);
-      
       if (res.statusCode >= 400 || req.path.includes("/login")) {
         console.log("Response:", data);
       }
@@ -129,7 +142,6 @@ app.use((req, res, next) => {
     }
     return originalJson(data);
   };
-
   next();
 });
 
@@ -141,7 +153,7 @@ app.use(blockCommercialVPN);
 console.log("✅ VPN blocker active");
 
 // ─────────────────────────────────────────────
-// RATE LIMITER (BUN-COMPATIBLE ✅)
+// RATE LIMITER (BUN-COMPATIBLE)
 // ─────────────────────────────────────────────
 console.log("🚦 Configuring rate limiter...");
 
@@ -173,13 +185,11 @@ console.log("✅ Rate limiter ready");
 // ROUTES
 // ─────────────────────────────────────────────
 console.log("🛣️ Loading routes...");
-
 app.use("/api/auth/register", publicLimiter, registerRoutes);
 app.use("/api/auth/login", loginLimiter, loginRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api", uploadRoutes);
 app.use("/api", recordsRoutes);
-
 console.log("✅ Routes loaded");
 
 // ─────────────────────────────────────────────
@@ -207,7 +217,6 @@ app.use((req, res) => {
 // ─────────────────────────────────────────────
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (res.headersSent) return next(err);
-
   console.log("\n========================================");
   console.log("❌ GLOBAL ERROR");
   console.log("Path   :", req.originalUrl);
@@ -226,7 +235,6 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
       error: field === "officerId" ? "Officer ID already exists" : "Email already exists",
     });
   }
-
   if (err.code?.startsWith("auth/")) {
     console.log("🔥 Firebase Error:", err.code);
     const firebaseErrors: Record<string, { status: number; code: string; message: string }> = {
@@ -239,12 +247,10 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
     const fbErr = firebaseErrors[err.code];
     if (fbErr) return res.status(fbErr.status).json({ success: false, code: fbErr.code, error: fbErr.message });
   }
-
   if (err.name === "ValidationError") {
     console.log("⚠️ Validation Error");
     return res.status(400).json({ success: false, code: "VALIDATION_ERROR", error: Object.values(err.errors).map((e: any) => e.message) });
   }
-
   return res.status(500).json({
     success: false,
     code: "INTERNAL_ERROR",
@@ -267,19 +273,14 @@ function initWebSocket(server: ReturnType<typeof createServer>) {
   io.use((socket, next) => {
     const token = socket.handshake.auth.token as string | undefined;
     if (!token) return next(new Error("Missing authentication token"));
-
     try {
       const decoded = verify(token, env.JWT_SECRET, {
         issuer: "blowsafe-backend",
         audience: "blowsafe-frontend",
       }) as JwtPayload & { role: string; officerId: string; uid: string };
-
-      // Only allow strict roles to connect via WebSocket
       if (!STRICT_ROLES.has(decoded.role)) {
         return next(new Error("Insufficient privileges for WebSocket session"));
       }
-
-      // Attach decoded user to socket for later use
       (socket as any).user = decoded;
       next();
     } catch (err) {
@@ -289,18 +290,37 @@ function initWebSocket(server: ReturnType<typeof createServer>) {
 
   io.on("connection", (socket) => {
     const user = (socket as any).user;
-    console.log(`🔌 WS Connected | Officer: ${user.officerId} | Role: ${user.role} | IP: ${socket.handshake.address}`);
+    const timestamp = new Date().toISOString();
+    
+    // ✅ CLEAR CONNECT LOG
+    console.log(`\n🔌 [${timestamp}] WS CONNECTED`);
+    console.log(`   Officer: ${user.officerId}`);
+    console.log(`   Role   : ${user.role}`);
+    console.log(`   IP     : ${socket.handshake.address}`);
+    console.log(`   UA     : ${socket.handshake.headers["user-agent"]?.slice(0, 60)}`);
+    console.log(`========================================\n`);
 
-    // Optional: Send welcome/heartbeat
+    // Send welcome + start heartbeat
     socket.emit("connected", { message: "Secure session established", timestamp: Date.now() });
 
+    // ✅ CLEAR DISCONNECT LOG
     socket.on("disconnect", (reason) => {
-      console.log(`🔌 WS Disconnected | Officer: ${user.officerId} | Reason: ${reason}`);
-      // Optional: Log to audit_logs here if needed
+      const ts = new Date().toISOString();
+      console.log(`\n🔌 [${ts}] WS DISCONNECTED`);
+      console.log(`   Officer: ${user.officerId}`);
+      console.log(`   Role   : ${user.role}`);
+      console.log(`   Reason : ${reason}`);
+      console.log(`========================================\n`);
     });
 
+    // ✅ CLEAR ERROR LOG
     socket.on("error", (err) => {
-      console.error(`⚠️ WS Error | Officer: ${user.officerId} | Error: ${err.message}`);
+      const ts = new Date().toISOString();
+      console.error(`\n⚠️ [${ts}] WS ERROR`);
+      console.error(`   Officer: ${user.officerId}`);
+      console.error(`   Role   : ${user.role}`);
+      console.error(`   Error  : ${err.message}`);
+      console.log(`========================================\n`);
     });
   });
 
@@ -328,9 +348,9 @@ async function startServer() {
       console.log("\n========================================");
       console.log("🚀 BLOWSAFE BACKEND LIVE");
       console.log("🌍 Environment:", env.NODE_ENV);
-      console.log("🌐 Port:", env.PORT);
-      console.log("🔗 URL: http://localhost:" + env.PORT);
-      console.log("🔌 WS: ws://localhost:" + env.PORT);
+      console.log("🌐 Internal Port:", env.PORT);
+      console.log("🌐 Public URL:", urls.http);
+      console.log("🔌 Public WS:", urls.ws);
       console.log("⏰ Live At:", new Date().toISOString());
       console.log("========================================\n");
     });
@@ -343,9 +363,6 @@ async function startServer() {
   }
 }
 
-// ─────────────────────────────────────────────
-// PROCESS ERROR HANDLERS
-// ─────────────────────────────────────────────
 process.on("uncaughtException", (err) => {
   console.log("\n========================================");
   console.log("❌ UNCAUGHT EXCEPTION");
