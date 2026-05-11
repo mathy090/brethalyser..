@@ -1,73 +1,310 @@
 /**
  * blowsafe-backend/src/auth/login.ts
- * Handles POST /api/auth/login
+ * 
+ * Production login: Firebase Auth + MongoDB Read-Only Status Check
+ * 
+ * Flow:
+ * 1. Verify Firebase ID token (proves password is correct)
+ * 2. READ officer from MongoDB by officerId (ZERO writes)
+ * 3. Validate email match + account status == "approved"
+ * 4. Issue short-lived BlowSafe JWT with user metadata
+ * 5. Log audit event (fire-and-forget, non-blocking)
+ * 
+ * ⚠️ NO MongoDB writes. NO updates. NO inserts. Pure read-only validation.
  */
+
 import { Router, Request, Response } from "express";
 import admin from "firebase-admin";
 import jwt from "jsonwebtoken";
+
 import { env } from "../config/env";
+import { getDb } from "../config/mongo";
+import { logAudit } from "../utils/auditLogger";
 
 const router = Router();
 
-// 🔹 Mock DB for dev (replace with Prisma/Mongoose/PostgreSQL later)
-const OFFICERS_DB: Record<string, { officerId: string; role: string; status: string; email: string }> = {
-  "A123456B": { officerId: "A123456B", role: "admin", status: "approved", email: "admin@zrp.gov.zw" },
-  "123456789": { officerId: "123456789", role: "officer", status: "approved", email: "officer@zrp.gov.zw" },
-  "PENDING01": { officerId: "PENDING01", role: "officer", status: "pending", email: "pending@zrp.gov.zw" },
-  "BANNED001": { officerId: "BANNED001", role: "officer", status: "banned", email: "banned@zrp.gov.zw" },
-};
+// ─── Types ───────────────────────────────────────────────────────────────────
 
-// ✅ MUST use "/" because Express strips "/api/auth/login" from the path
+interface OfficerDocument {
+  officerId: string;
+  email: string;
+  role: "admin" | "officer" | "superadmin";
+  status: "approved" | "pending" | "rejected" | "banned";
+  // Add other fields as needed, but we only READ these
+}
+
+interface LoginRequest {
+  officerId: string;
+}
+
+interface LoginSuccessResponse {
+  token: string;
+  uid: string;
+  email: string;
+  officerId: string;
+  role: OfficerDocument["role"];
+  status: OfficerDocument["status"];
+}
+
+interface LoginErrorResponse {
+  success: false;
+  code: string;
+  message: string;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const normalizeOfficerId = (id: string): string => id.trim().toUpperCase();
+
+// ─── POST /api/auth/login ────────────────────────────────────────────────────
+
 router.post("/", async (req: Request, res: Response) => {
-  console.log("🔐 LOGIN ROUTE EXECUTING | Path:", req.originalUrl);
+  const startTime = Date.now();
+  const requestId = req.headers["x-request-id"] || Math.random().toString(36).slice(2);
+  const clientIp =
+    req.headers["cf-connecting-ip"] ||
+    req.headers["x-forwarded-for"] ||
+    req.ip ||
+    "unknown";
+
   try {
+    // ── 1. Extract & validate Authorization header ───────────────────────────
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
-      return res.status(401).json({ code: "MISSING_TOKEN", message: "Missing Firebase ID token." });
+      const error: LoginErrorResponse = {
+        success: false,
+        code: "MISSING_TOKEN",
+        message: "Missing Firebase ID token.",
+      };
+      logAudit({
+        event: "login_attempt",
+        requestId,
+        ip: clientIp,
+        success: false,
+        reason: "missing_token",
+        duration: Date.now() - startTime,
+      }).catch(() => {});
+      return res.status(401).json(error);
     }
 
-    const idToken = authHeader.split("Bearer ")[1];
-    const decoded = await admin.auth().verifyIdToken(idToken);
-    const { officerId } = req.body;
-
-    if (!officerId) {
-      return res.status(400).json({ code: "MISSING_OFFICER_ID", message: "Officer ID is required." });
+    const idToken = authHeader.split("Bearer ")[1].trim();
+    if (!idToken) {
+      const error: LoginErrorResponse = {
+        success: false,
+        code: "INVALID_TOKEN_FORMAT",
+        message: "Invalid token format.",
+      };
+      logAudit({
+        event: "login_attempt",
+        requestId,
+        ip: clientIp,
+        success: false,
+        reason: "invalid_token_format",
+        duration: Date.now() - startTime,
+      }).catch(() => {});
+      return res.status(401).json(error);
     }
 
-    const officer = OFFICERS_DB[officerId.trim().toUpperCase()];
+    // ── 2. Verify token with Firebase Admin SDK ──────────────────────────────
+    let decoded: admin.auth.DecodedIdToken;
+    try {
+      decoded = await admin.auth().verifyIdToken(idToken);
+    } catch (err: any) {
+      const isFirebaseAuthError = err.code?.startsWith("auth/");
+      const error: LoginErrorResponse = {
+        success: false,
+        code: isFirebaseAuthError ? "INVALID_TOKEN" : "TOKEN_VERIFICATION_FAILED",
+        message: isFirebaseAuthError ? "Invalid or expired Firebase token." : "Token verification failed.",
+      };
+      logAudit({
+        event: "login_attempt",
+        requestId,
+        ip: clientIp,
+        success: false,
+        reason: isFirebaseAuthError ? "invalid_firebase_token" : "token_verification_failed",
+        firebaseUid: err.uid || null,
+        duration: Date.now() - startTime,
+      }).catch(() => {});
+      return res.status(401).json(error);
+    }
+
+    const firebaseUid = decoded.uid;
+    const firebaseEmail = decoded.email?.toLowerCase();
+
+    if (!firebaseEmail) {
+      const error: LoginErrorResponse = {
+        success: false,
+        code: "MISSING_FIREBASE_EMAIL",
+        message: "Firebase account has no verified email.",
+      };
+      logAudit({
+        event: "login_attempt",
+        requestId,
+        ip: clientIp,
+        success: false,
+        reason: "missing_firebase_email",
+        firebaseUid,
+        duration: Date.now() - startTime,
+      }).catch(() => {});
+      return res.status(400).json(error);
+    }
+
+    // ── 3. Extract & validate officerId from request body ────────────────────
+    const { officerId: rawOfficerId } = req.body as LoginRequest;
+    if (!rawOfficerId || typeof rawOfficerId !== "string") {
+      const error: LoginErrorResponse = {
+        success: false,
+        code: "MISSING_OFFICER_ID",
+        message: "Officer ID is required.",
+      };
+      logAudit({
+        event: "login_attempt",
+        requestId,
+        ip: clientIp,
+        success: false,
+        reason: "missing_officer_id",
+        duration: Date.now() - startTime,
+      }).catch(() => {});
+      return res.status(400).json(error);
+    }
+
+    const officerId = normalizeOfficerId(rawOfficerId);
+
+    // ── 4. READ officer from MongoDB (ZERO writes) ───────────────────────────
+    const db = await getDb();
+    const officersCollection = db.collection<OfficerDocument>("officers");
+
+    // ✅ READ-ONLY: findOne, no updates, no inserts
+    const officer = await officersCollection.findOne({ officerId });
+
     if (!officer) {
-      return res.status(404).json({ code: "OFFICER_NOT_FOUND", message: "Officer ID not found." });
+      const error: LoginErrorResponse = {
+        success: false,
+        code: "OFFICER_NOT_FOUND",
+        message: "Officer ID not found.",
+      };
+      logAudit({
+        event: "login_attempt",
+        requestId,
+        ip: clientIp,
+        officerId,
+        success: false,
+        reason: "officer_not_found",
+        duration: Date.now() - startTime,
+      }).catch(() => {});
+      return res.status(404).json(error);
     }
 
-    if (officer.email.toLowerCase() !== decoded.email?.toLowerCase()) {
-      return res.status(403).json({ code: "EMAIL_MISMATCH", message: "Email does not match officer record." });
+    // ── 5. Validate email match (prevent account takeover) ───────────────────
+    const dbEmail = officer.email.toLowerCase();
+    if (dbEmail !== firebaseEmail) {
+      const error: LoginErrorResponse = {
+        success: false,
+        code: "EMAIL_MISMATCH",
+        message: "Email does not match officer record.",
+      };
+      logAudit({
+        event: "login_attempt",
+        requestId,
+        ip: clientIp,
+        officerId,
+        firebaseUid,
+        success: false,
+        reason: "email_mismatch",
+        duration: Date.now() - startTime,
+      }).catch(() => {});
+      return res.status(403).json(error);
     }
 
-    if (officer.status === "pending") {
-      return res.status(403).json({ code: "ACCOUNT_PENDING", message: "Account pending approval." });
-    }
-    if (["banned", "rejected"].includes(officer.status)) {
-      return res.status(403).json({ code: "ACCOUNT_REJECTED", message: "Account has been banned." });
+    // ── 6. Validate account status (CRITICAL: only "approved" can login) ─────
+    if (officer.status !== "approved") {
+      const statusCode = officer.status === "pending" ? "ACCOUNT_PENDING" : "ACCOUNT_REJECTED";
+      const statusMessage =
+        officer.status === "pending"
+          ? "Account pending approval by administrator."
+          : "Account access has been denied by administrator.";
+
+      const error: LoginErrorResponse = {
+        success: false,
+        code: statusCode,
+        message: statusMessage,
+      };
+      logAudit({
+        event: "login_attempt",
+        requestId,
+        ip: clientIp,
+        officerId,
+        firebaseUid,
+        success: false,
+        reason: `account_${officer.status}`,
+        duration: Date.now() - startTime,
+      }).catch(() => {});
+      return res.status(403).json(error);
     }
 
-    const blowSafeToken = jwt.sign(
-      { uid: decoded.uid, officerId: officer.officerId, role: officer.role, status: officer.status },
-      env.JWT_SECRET || "dev-fallback-secret",
-      { expiresIn: "5m" }
-    );
-
-    return res.status(200).json({
-      token: blowSafeToken,
+    // ── 7. Generate BlowSafe JWT (5-minute expiry) ───────────────────────────
+    const jwtPayload = {
+      uid: firebaseUid,
+      email: firebaseEmail,
       officerId: officer.officerId,
       role: officer.role,
       status: officer.status,
+      email_verified: decoded.email_verified || false,
+    };
+
+    const blowSafeToken = jwt.sign(jwtPayload, env.JWT_SECRET, {
+      expiresIn: env.JWT_EXPIRES_IN || "5m",
+      issuer: "blowsafe-backend",
+      audience: "blowsafe-frontend",
     });
+
+    // ── 8. Prepare success response ──────────────────────────────────────────
+    const successResponse: LoginSuccessResponse = {
+      token: blowSafeToken,
+      uid: firebaseUid,
+      email: firebaseEmail,
+      officerId: officer.officerId,
+      role: officer.role,
+      status: officer.status,
+    };
+
+    // ── 9. Log successful login (fire-and-forget, non-blocking) ──────────────
+    logAudit({
+      event: "login_success",
+      requestId,
+      ip: clientIp,
+      officerId: officer.officerId,
+      firebaseUid,
+      role: officer.role,
+      duration: Date.now() - startTime,
+    }).catch(() => {});
+
+    // ── 10. Return response ──────────────────────────────────────────────────
+    return res.status(200).json(successResponse);
+
   } catch (error: any) {
-    console.error("❌ Login Error:", error.message);
-    if (error.code?.includes("auth/")) {
-      return res.status(401).json({ code: "INVALID_TOKEN", message: "Invalid Firebase token." });
-    }
-    return res.status(500).json({ code: "SERVER_ERROR", message: "Internal server error." });
+    // ── Unhandled error: log + return safe generic response ─────────────────
+    console.error("❌ Unhandled login error:", {
+      message: error.message,
+      stack: env.NODE_ENV === "development" ? error.stack : undefined,
+      requestId,
+    });
+
+    logAudit({
+      event: "login_error",
+      requestId,
+      ip: clientIp,
+      success: false,
+      reason: "unhandled_error",
+      error: error.message,
+      duration: Date.now() - startTime,
+    }).catch(() => {});
+
+    return res.status(500).json({
+      success: false,
+      code: "INTERNAL_ERROR",
+      message: env.NODE_ENV === "production" ? "An unexpected error occurred." : error.message,
+    } as LoginErrorResponse);
   }
 });
 
