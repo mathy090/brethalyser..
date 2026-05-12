@@ -1,108 +1,71 @@
-/**
- * src/middleware/verifyToken.ts
- *
- * Express middleware for token verification.
- *
- * Layer 1 — verifyFirebaseToken
- *   Validates the short-lived Firebase ID token sent immediately after Firebase
- *   authentication. Used on /register and /login only.
- *
- * Layer 2 — verifyJWT
- *   Validates the long-lived BlowSafe JWT issued by /login and /refresh.
- *   Used on every protected API endpoint.
- *
- * Layer 3 — requireRole
- *   Role-based access control guard. Must be applied after verifyJWT.
- */
+// src/middleware/verifyToken.ts
+import { Request, Response, NextFunction } from "express";
+import jwt from "jsonwebtoken";
+import { getDb } from "../config/mongo";
+import { env } from "../config/env";
 
-import type { Request, Response, NextFunction } from "express";
-import jwt                                       from "jsonwebtoken";
-
-import { env }    from "../config/env";
-import { Errors } from "../utils/errors";
-import admin      from "../config/firebase";
-
-// ─── Extended request type ───────────────────────────────────────────────────
-
-export interface AuthRequest extends Request {
-  uid?:       string;
-  officerId?: string;
-  role?:      string;
-}
-
-// ─── Layer 1: Firebase ID token ──────────────────────────────────────────────
-
-export const verifyFirebaseToken = async (
-  req:  AuthRequest,
-  res:  Response,
+export async function verifyAccessToken(
+  req: Request,
+  res: Response,
   next: NextFunction
-): Promise<void> => {
-  const token = extractBearer(req);
-
-  if (!token) {
-    Errors.noToken(res);
+): Promise<void> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    res.status(401).json({ code: "MISSING_TOKEN", message: "Access token required" });
     return;
   }
 
-  try {
-    const decoded = await admin.auth().verifyIdToken(token);
-    req.uid = decoded.uid;
-    next();
-  } catch {
-    // Firebase throws for expired, revoked, or malformed tokens — all map to 401.
-    Errors.invalidToken(res);
-  }
-};
-
-// ─── Layer 2: BlowSafe JWT ───────────────────────────────────────────────────
-
-export const verifyJWT = (
-  req:  AuthRequest,
-  res:  Response,
-  next: NextFunction
-): void => {
-  const token = extractBearer(req);
-
-  if (!token) {
-    Errors.noToken(res);
-    return;
-  }
+  const token = authHeader.split("Bearer ")[1].trim();
 
   try {
-    const decoded = jwt.verify(token, env.JWT_SECRET) as {
-      uid:       string;
-      officerId: string;
-      role:      string;
-      status:    string;
-    };
+    // 1️⃣ Verify JWT signature + expiry
+    const payload = jwt.verify(token, env.JWT_SECRET, {
+      issuer: "blowsafe-backend",
+      audience: "blowsafe-frontend",
+    }) as { uid: string; officerId: string; role: string };
 
-    req.uid       = decoded.uid;
-    req.officerId = decoded.officerId;
-    req.role      = decoded.role;
-    next();
-  } catch {
-    // Covers TokenExpiredError, JsonWebTokenError, NotBeforeError.
-    Errors.invalidToken(res);
-  }
-};
+    // 2️⃣ Check denylist (is this token explicitly revoked?)
+    const db = getDb();
+    const revoked = await db.collection("token_denylist").findOne({
+      token,
+      expiresAt: { $gt: new Date() }, // Only check non-expired denylist entries
+    });
 
-// ─── Layer 3: Role guard ─────────────────────────────────────────────────────
-
-export const requireRole =
-  (...roles: string[]) =>
-  (req: AuthRequest, res: Response, next: NextFunction): void => {
-    if (!req.role || !roles.includes(req.role)) {
-      Errors.insufficientPermissions(res);
+    if (revoked) {
+      res.status(401).json({ 
+        code: "TOKEN_REVOKED", 
+        message: "Session has been revoked. Please sign in again." 
+      });
       return;
     }
+
+    // 3️⃣ Attach user to request for downstream handlers
+    req.user = payload;
     next();
-  };
 
-// ─── Helper ──────────────────────────────────────────────────────────────────
+  } catch (err: any) {
+    if (err.name === "TokenExpiredError") {
+      res.status(401).json({ code: "TOKEN_EXPIRED", message: "Access token expired" });
+    } else if (err.name === "JsonWebTokenError") {
+      res.status(401).json({ code: "INVALID_TOKEN", message: "Invalid access token" });
+    } else {
+      console.error("[Token Verification Error]", err);
+      res.status(500).json({ code: "INTERNAL_ERROR", message: "Token verification failed" });
+    }
+  }
+}
 
-function extractBearer(req: Request): string | null {
-  const header = req.headers.authorization;
-  if (!header?.startsWith("Bearer ")) return null;
-  const token = header.split(" ")[1];
-  return token?.trim() || null;
+// Extend Express Request type
+declare global {
+  namespace Express {
+    interface Request {
+      user?: {
+        uid: string;
+        officerId: string;
+        role: string;
+        email?: string;
+        status?: string;
+      };
+    }
+  }
 }

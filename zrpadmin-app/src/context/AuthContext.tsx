@@ -1,73 +1,89 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+/**
+ * src/context/AuthContext.tsx
+ *
+ * Auth state management:
+ * - Access token stored in memory (React state), NOT localStorage
+ * - Refresh token handled by httpOnly cookie (backend sets/reads)
+ * - Safe logout: clear memory token + call backend to clear cookie
+ */
 
-interface AuthUser {
-  token: string;
-  officerId: string;
+import React, { createContext, useContext, useState, useCallback, useEffect } from "react";
+
+interface User {
   uid: string;
-  role: string;
-  status: string;
+  email: string;
+  officerId: string;
+  role: "admin" | "officer" | "superadmin";
+  status: "approved" | "pending" | "rejected" | "banned";
 }
 
 interface AuthContextType {
-  user: AuthUser | null;
+  user: User | null;
   isAuthenticated: boolean;
-  login: (user: AuthUser) => void;
-  logout: () => void;
+  login: (user: User, accessToken: string) => void;
+  logout: () => Promise<void>;
+  refreshUser: (updates: Partial<User>) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const STORAGE_KEY = 'blowsafe_session';
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
 
-function loadFromStorage(): AuthUser | null {
-  try {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as AuthUser & { expiresAt: number };
-    if (Date.now() > parsed.expiresAt) {
-      sessionStorage.removeItem(STORAGE_KEY);
-      return null;
+  // ── Login: store user + access token in memory only ───────────────────────
+  const login = useCallback((userData: User, token: string) => {
+    setUser(userData);
+    setAccessToken(token);
+    // ✅ Access token is in React state only — not in localStorage
+    // ✅ Refresh token is in httpOnly cookie — set by backend, unreadable by JS
+  }, []);
+
+  // ── Logout: clear memory + call backend to clear cookie ───────────────────
+  const logout = useCallback(async () => {
+    try {
+      // Call backend to clear httpOnly refresh token cookie
+      await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/auth/logout`, {
+        method: "POST",
+        credentials: "include", // ✅ Send cookie so backend can clear it
+      });
+    } catch (err) {
+      console.warn("Logout API call failed, clearing local state anyway", err);
+    } finally {
+      // Clear in-memory state regardless of API result
+      setUser(null);
+      setAccessToken(null);
     }
-    return parsed;
-  } catch {
-    return null;
-  }
-}
+  }, []);
 
-export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<AuthUser | null>(loadFromStorage);
+  // ── Update user metadata (e.g., after profile edit) ───────────────────────
+  const refreshUser = useCallback((updates: Partial<User>) => {
+    setUser((prev) => (prev ? { ...prev, ...updates } : prev));
+  }, []);
 
-  const login = (incoming: AuthUser) => {
-    const withExpiry = { ...incoming, expiresAt: Date.now() + 5 * 60 * 1000 };
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(withExpiry));
-    setUser(incoming);
-  };
+  // ── Check if authenticated ────────────────────────────────────────────────
+  const isAuthenticated = !!user && !!accessToken;
 
-  const logout = () => {
-    sessionStorage.removeItem(STORAGE_KEY);
-    setUser(null);
-  };
-
-  // Auto-expire check every 30s
+  // ── Optional: Check for expired session on mount ──────────────────────────
   useEffect(() => {
-    const id = setInterval(() => {
-      const stored = loadFromStorage();
-      if (!stored && user) {
-        setUser(null);
-      }
-    }, 30_000);
-    return () => clearInterval(id);
-  }, [user]);
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("expired") === "1") {
+      // Session expired banner handled by Login component
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
 
   return (
-    <AuthContext.Provider value={{ user, isAuthenticated: !!user, login, logout }}>
+    <AuthContext.Provider value={{ user, isAuthenticated, login, logout, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );
-};
+}
 
-export const useAuth = () => {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
-  return ctx;
-};
+export function useAuth() {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error("useAuth must be used within AuthProvider");
+  }
+  return context;
+}

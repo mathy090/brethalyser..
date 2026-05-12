@@ -23,7 +23,7 @@ import { blockCommercialVPN } from "./middleware/vpnBlocker";
 
 // ── Routes ──────────────────────────────────────────────────────────────────
 import registerRoutes from "./routes/register";
-import loginRoutes from "./auth/login";
+import loginRoutes from "./routes/login";
 import refreshRoutes from "./auth/refresh"; // ✅ New: token refresh
 import logoutRoutes from "./auth/logout";   // ✅ New: logout
 import adminRoutes from "./routes/admin";
