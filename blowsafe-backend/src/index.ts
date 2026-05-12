@@ -1,10 +1,11 @@
 /**
  * blowsafe-backend/src/index.ts
  *
- * Entry point for the Express + Socket.IO + Redis backend.
- * - Starts HTTP server immediately (non-blocking Redis init)
- * - Graceful shutdown for Redis + HTTP + Socket.IO
- * - Integrates existing middleware, routes, and auth
+ * Entry point for the Express backend (HTTP-only).
+ * - Simple JWT auth with access + refresh tokens
+ * - No WebSockets, no Redis, no real-time layer
+ * - Graceful shutdown for HTTP server + MongoDB
+ * - Clean, production-ready, easy to maintain
  */
 
 import express from "express";
@@ -13,17 +14,18 @@ import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
+import cookieParser from "cookie-parser"; // ✅ For refresh token cookies
 
 import { env } from "./config/env";
-import { connectMongo } from "./config/mongo";
+import { connectMongo, closeMongo } from "./config/mongo";
 import { initFirebaseAdmin } from "./config/firebase";
-import { initRedis, closeRedis } from "./config/redis";
-import { createSocketServer, closeSocketServer } from "./sockets/server";
 import { blockCommercialVPN } from "./middleware/vpnBlocker";
 
 // ── Routes ──────────────────────────────────────────────────────────────────
 import registerRoutes from "./routes/register";
 import loginRoutes from "./auth/login";
+import refreshRoutes from "./auth/refresh"; // ✅ New: token refresh
+import logoutRoutes from "./auth/logout";   // ✅ New: logout
 import adminRoutes from "./routes/admin";
 import uploadRoutes from "./routes/upload";
 import recordsRoutes from "./routes/records";
@@ -35,20 +37,21 @@ const httpServer = createServer(app);
 app.set("trust proxy", true);
 app.disable("x-powered-by");
 
-// Security headers
+// ── Security headers ────────────────────────────────────────────────────────
 app.use(
   helmet({
-    crossOriginResourcePolicy: false, // Allow images/fonts from CDN
-    contentSecurityPolicy: env.NODE_ENV === "production" ? undefined : false,
+    crossOriginResourcePolicy: false, // Allow CDN resources
+    contentSecurityPolicy:
+      env.NODE_ENV === "production" ? undefined : false, // Relax in dev
   })
 );
 app.use(compression());
 
-// CORS
+// ── CORS ────────────────────────────────────────────────────────────────────
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
+      if (!origin) return cb(null, true); // Allow non-browser requests
       if (env.NODE_ENV === "production") {
         const allowed = (env.CORS_ORIGIN ?? "")
           .split(",")
@@ -58,19 +61,20 @@ app.use(
           ? cb(null, true)
           : cb(new Error("CORS blocked"));
       }
-      return cb(null, true);
+      return cb(null, true); // Dev: allow all
     },
-    credentials: true,
+    credentials: true, // ✅ Allow cookies (refreshToken)
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-Request-ID"],
   })
 );
 
-// Body parsers
+// ── Body parsers ────────────────────────────────────────────────────────────
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser()); // ✅ Parse cookies for refresh token
 
-// VPN blocker middleware
+// ── VPN blocker middleware ──────────────────────────────────────────────────
 app.use(blockCommercialVPN);
 
 // ── Rate limiters ───────────────────────────────────────────────────────────
@@ -80,8 +84,8 @@ const keyGenerator = (req: express.Request) =>
     .trim();
 
 const publicLimiter = rateLimit({
-  windowMs: 15 * 60_000,
-  max: 20,
+  windowMs: 15 * 60_000, // 15 minutes
+  max: 20, // 20 requests per window
   trustProxy: true,
   keyGenerator,
   handler: (_req, res) =>
@@ -90,21 +94,32 @@ const publicLimiter = rateLimit({
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60_000,
-  max: 5,
+  max: 5, // 5 login attempts per window
   trustProxy: true,
   keyGenerator,
   handler: (_req, res) =>
     res.status(429).json({ success: false, code: "LOGIN_RATE_LIMITED" }),
 });
 
+const refreshLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  max: 10, // 10 refresh attempts per window
+  trustProxy: true,
+  keyGenerator,
+  handler: (_req, res) =>
+    res.status(429).json({ success: false, code: "REFRESH_RATE_LIMITED" }),
+});
+
 // ── Routes ──────────────────────────────────────────────────────────────────
 app.use("/api/auth/register", publicLimiter, registerRoutes);
 app.use("/api/auth/login", loginLimiter, loginRoutes);
+app.use("/api/auth/refresh", refreshLimiter, refreshRoutes); // ✅ New
+app.use("/api/auth/logout", logoutRoutes); // ✅ New
 app.use("/api/admin", adminRoutes);
 app.use("/api", uploadRoutes);
 app.use("/api", recordsRoutes);
 
-// Health checks
+// ── Health checks ───────────────────────────────────────────────────────────
 app.get("/", (_req, res) =>
   res.json({ status: "ok", app: "BlowSafe", env: env.NODE_ENV })
 );
@@ -112,12 +127,12 @@ app.get("/health", (_req, res) =>
   res.json({ status: "ok", uptime: process.uptime(), timestamp: Date.now() })
 );
 
-// 404 handler
+// ── 404 handler ─────────────────────────────────────────────────────────────
 app.use((_req, res) =>
   res.status(404).json({ code: "NOT_FOUND", message: "Route not found" })
 );
 
-// Global error handler
+// ── Global error handler ────────────────────────────────────────────────────
 app.use(
   (
     err: any,
@@ -140,41 +155,26 @@ async function start(): Promise<void> {
   await connectMongo();
   await initFirebaseAdmin();
 
-  // 🚀 Start HTTP server IMMEDIATELY (critical for Render port detection)
+  // 🚀 Start HTTP server
   httpServer.listen(env.PORT, "0.0.0.0", () => {
     console.log(
       `[BlowSafe] 🚀 HTTP server listening on :${env.PORT} (${env.NODE_ENV})`
     );
+    console.log(`[BlowSafe] 🔐 Auth: JWT access + refresh tokens (HTTP-only)`);
   });
-
-  // 🔁 Initialize Redis + Socket.IO asynchronously (non-blocking)
-  try {
-    const { pub, sub } = await initRedis();
-    createSocketServer(httpServer, pub, sub);
-    console.log("[BlowSafe] ✅ Real-time layer initialized");
-  } catch (err) {
-    console.error(
-      "[BlowSafe] ⚠️  Real-time layer failed (continuing without scaling):",
-      err instanceof Error ? err.message : String(err)
-    );
-    // Fallback: Socket.IO in-memory mode
-    createSocketServer(httpServer, null, null);
-  }
 }
 
 // ── Graceful shutdown ───────────────────────────────────────────────────────
 async function shutdown(signal: string): Promise<void> {
-  console.log(`[BlowSafe] 🛑 ${signal} received — initiating graceful shutdown`);
+  console.log(`[BlowSafe] 🛑 ${signal} received — shutting down`);
 
   // Stop accepting new connections
   httpServer.close(async () => {
     console.log("[BlowSafe] 🔌 HTTP server closed");
 
-    // Close Socket.IO
-    await closeSocketServer();
-
-    // Close Redis
-    await closeRedis();
+    // Close MongoDB connection
+    await closeMongo();
+    console.log("[BlowSafe] 🔌 MongoDB closed");
 
     console.log("[BlowSafe] ✅ Shutdown complete — goodbye");
     process.exit(0);
@@ -182,7 +182,7 @@ async function shutdown(signal: string): Promise<void> {
 
   // Force exit after timeout
   setTimeout(() => {
-    console.error("[BlowSafe] ⚠️  Force exit after 10s timeout");
+    console.error("[BlowSafe] ⚠️ Force exit after 10s timeout");
     process.exit(1);
   }, 10_000);
 }
