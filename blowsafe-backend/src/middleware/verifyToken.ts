@@ -1,10 +1,11 @@
-// src/middleware/verifyToken.ts
+// src/middleware/verifyToken.ts — UPDATED EXPORT NAME
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { getDb } from "../config/mongo";
 import { env } from "../config/env";
 
-export async function verifyAccessToken(
+// ✅ Renamed from verifyAccessToken → verifyJWT
+export async function verifyJWT(
   req: Request,
   res: Response,
   next: NextFunction
@@ -28,7 +29,7 @@ export async function verifyAccessToken(
     const db = getDb();
     const revoked = await db.collection("token_denylist").findOne({
       token,
-      expiresAt: { $gt: new Date() }, // Only check non-expired denylist entries
+      expiresAt: { $gt: new Date() },
     });
 
     if (revoked) {
@@ -39,7 +40,7 @@ export async function verifyAccessToken(
       return;
     }
 
-    // 3️⃣ Attach user to request for downstream handlers
+    // 3️⃣ Attach user to request
     req.user = payload;
     next();
 
@@ -69,3 +70,6 @@ declare global {
     }
   }
 }
+
+// ✅ Also export as verifyAccessToken for backward compatibility (optional)
+export { verifyJWT as verifyAccessToken };
