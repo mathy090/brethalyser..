@@ -1,78 +1,77 @@
-/**
- * blowsafe-backend/src/config/redis.ts
- *
- * Redis client setup for Socket.IO adapter + general caching.
- * - Uses official 'redis' v4+ client (compatible with @socket.io/redis-adapter)
- * - Returns separate pub/sub clients for adapter pattern
- * - Graceful reconnect + error handling
- * - Works with Bun, Node, and Render
- */
-
-import { createClient, type RedisClientType } from 'redis';
-import { env } from './env';
-
-let pubClient: RedisClientType | null = null;
-let subClient: RedisClientType | null = null;
-let isInitialized = false;
-
+// src/config/redis.ts — UPDATED initRedis() function
 export async function initRedis(): Promise<{ pub: RedisClientType; sub: RedisClientType }> {
-  // Prevent duplicate initialization
   if (isInitialized && pubClient?.isOpen && subClient?.isOpen) {
     return { pub: pubClient!, sub: subClient! };
   }
 
   const redisUrl = env.REDIS_URL || 'redis://localhost:6379';
   const isProd = env.NODE_ENV === 'production';
+  
+  // 🔐 Detect Render's rediss:// (TLS) URL and parse correctly
+  const isTLS = redisUrl.startsWith('rediss://');
+  const urlObj = new URL(redisUrl.replace('rediss://', 'redis://')); // Parse safely
 
   try {
-    // ── Create PUB client (for emitting events) ──────────────────────────────
+    // ── Create PUB client ──────────────────────────────────────────────
     pubClient = createClient({
       url: redisUrl,
-      socket: {
+      // ✅ Explicit TLS config for Render/Upstash/Redis Cloud
+      socket: isTLS ? {
+        tls: true,
+        rejectUnauthorized: true, // ✅ Verify certs (Render's are valid)
         reconnectStrategy: (retries: number) => {
-          // Exponential backoff: 1s, 2s, 4s... max 30s
           const delay = Math.min(retries * 1000, 30000);
           console.log(`🔁 Redis reconnect attempt ${retries} in ${delay}ms`);
           return delay;
         },
         connectTimeout: 10000,
+      } : {
+        // Non-TLS (local dev)
+        reconnectStrategy: (retries: number) => Math.min(retries * 1000, 30000),
+        connectTimeout: 5000,
       },
-      // Optional: disable offline queue to avoid memory buildup during outages
       disableOfflineQueue: true,
     });
 
-    // ── Create SUB client (for receiving broadcasts) ─────────────────────────
     subClient = pubClient.duplicate();
 
-    // ── Event listeners (both clients) ───────────────────────────────────────
+    // ── Event listeners ───────────────────────────────────────────────
     const setupListeners = (client: RedisClientType, label: string) => {
       client.on('error', (err) => {
-        console.error(`❌ Redis ${label} error:`, err.message);
+        // ⚠️ Don't spam logs on transient errors in prod
+        if (isProd && (err.message.includes('ECONNRESET') || err.message.includes('ETIMEDOUT'))) {
+          console.warn(`⚠️ Redis ${label} transient error:`, err.message);
+        } else {
+          console.error(`❌ Redis ${label} error:`, err.message);
+        }
       });
       client.on('connect', () => {
-        console.log(`✅ Redis ${label} connected: ${redisUrl.replace(/:[^:@]+@/, ':***@')}`);
+        const safeUrl = redisUrl.replace(/:[^:@]+@/, ':***@');
+        console.log(`✅ Redis ${label} connected: ${safeUrl}`);
       });
-      client.on('ready', () => {
-        console.log(`🟢 Redis ${label} ready`);
-      });
-      client.on('end', () => {
-        console.log(`🔌 Redis ${label} connection ended`);
-      });
-      if (isProd) {
-        client.on('reconnecting', () => {
-          console.log(`🔄 Redis ${label} reconnecting...`);
-        });
-      }
+      client.on('ready', () => console.log(`🟢 Redis ${label} ready`));
+      client.on('end', () => console.log(`🔌 Redis ${label} connection ended`));
     };
 
     setupListeners(pubClient, 'PUB');
     setupListeners(subClient, 'SUB');
 
-    // ── Connect both clients ─────────────────────────────────────────────────
-    await pubClient.connect();
-    await subClient.connect();
+    // ── Connect with timeout guard ────────────────────────────────────
+    const connectWithTimeout = (client: RedisClientType, timeoutMs: number) => {
+      return Promise.race([
+        client.connect(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error(`Redis connect timeout after ${timeoutMs}ms`)), timeoutMs)
+        )
+      ]);
+    };
 
-    // ── Health check (optional but recommended) ──────────────────────────────
+    await Promise.all([
+      connectWithTimeout(pubClient, isProd ? 15000 : 5000),
+      connectWithTimeout(subClient, isProd ? 15000 : 5000),
+    ]);
+
+    // Health check
     await pubClient.ping();
     console.log('✅ Redis health check: PONG');
 
@@ -82,51 +81,36 @@ export async function initRedis(): Promise<{ pub: RedisClientType; sub: RedisCli
   } catch (error) {
     console.error('❌ Failed to initialize Redis:', error);
     
-    // ⚠️ Graceful fallback: return mock clients for local dev without Redis
+    // 🟡 Dev fallback: mock clients
     if (!isProd) {
       console.warn('⚠️ Running without Redis (dev fallback). Real-time features will be local-only.');
-      // Return minimal mock clients that won't crash Socket.IO adapter init
-      const mockClient = {
-        isOpen: false,
-        connect: async () => {},
-        quit: async () => {},
-        duplicate: () => mockClient,
-        on: () => {},
-        off: () => {},
-        ping: async () => 'PONG',
-        // Add other methods Socket.IO adapter might call (no-ops)
-        publish: async () => 0,
-        subscribe: async () => {},
-        unsubscribe: async () => {},
-      } as unknown as RedisClientType;
+      const mockClient = createMockRedisClient();
       return { pub: mockClient, sub: mockClient };
     }
     
-    // In production, fail fast — Redis is required for scaling
+    // 🔴 Prod: throw so we notice, but don't crash the whole server
+    // (Caller in index.ts handles fallback)
     throw new Error(`Redis initialization failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
-export async function closeRedis(): Promise<void> {
-  try {
-    if (subClient?.isOpen) {
-      await subClient.quit();
-      console.log('🔌 Redis SUB client closed');
-    }
-    if (pubClient?.isOpen && pubClient !== subClient) {
-      await pubClient.quit();
-      console.log('🔌 Redis PUB client closed');
-    }
-    isInitialized = false;
-  } catch (err) {
-    console.error('⚠️ Error closing Redis:', err);
-  }
-}
-
-// ── Optional: Helper for general Redis operations (caching, etc.) ────────────
-export async function getRedisClient(): Promise<RedisClientType> {
-  if (!pubClient?.isOpen) {
-    await initRedis();
-  }
-  return pubClient!;
+// ── Helper: Create mock Redis client for dev fallback ─────────────────
+function createMockRedisClient(): RedisClientType {
+  const mock = {
+    isOpen: false,
+    connect: async () => { mock.isOpen = true; },
+    quit: async () => { mock.isOpen = false; },
+    duplicate: () => mock,
+    on: () => {},
+    off: () => {},
+    ping: async () => 'PONG',
+    publish: async () => 0,
+    subscribe: async () => {},
+    unsubscribe: async () => {},
+    // Add other methods Socket.IO adapter might call
+    set: async () => 'OK',
+    get: async () => null,
+    del: async () => 0,
+  } as unknown as RedisClientType;
+  return mock;
 }
