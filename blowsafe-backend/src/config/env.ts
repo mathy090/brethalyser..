@@ -27,6 +27,7 @@ function loadEnv(): Record<RequiredKey, string> & {
   API_RATE_LIMIT_WINDOW: number;
   TRIGGER_SECRET:        string | undefined;
   CORS_ORIGIN:           string | undefined;
+  REDIS_URL:             string;  // ✅ Added
   NODE_ENV:              string;
 } {
   const missing: string[] = [];
@@ -79,6 +80,13 @@ function loadEnv(): Record<RequiredKey, string> & {
 
     /** Allowed CORS origin in production. */
     CORS_ORIGIN: process.env.CORS_ORIGIN?.trim(),
+
+    /**
+     * Redis connection URL.
+     * Default: redis://localhost:6379 (for local dev)
+     * Render auto-injects this when Redis addon is enabled.
+     */
+    REDIS_URL: process.env.REDIS_URL?.trim() ?? "redis://localhost:6379", // ✅ Added
 
     NODE_ENV: process.env.NODE_ENV ?? "development",
   };
